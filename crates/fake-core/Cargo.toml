@@ -1,0 +1,27 @@
+[package]
+name = "fake-core"
+version = "0.1.0-alpha"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fake-core"
+path = "src/main.rs"
+
+[dependencies]
+protobuf-varint-deframer.workspace = true
+zconned-stdio-types.workspace = true
+zconned-material.workspace = true
+prost.workspace = true
+pbjson-types.workspace = true
+prost-types.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+jiff.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+clap-verbosity-flag.workspace = true

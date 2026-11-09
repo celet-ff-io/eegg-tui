@@ -32,6 +32,9 @@ shlex = "2.0.1"
 # --- timestamps on the UI surface ---
 jiff = "0.2.41"
 
+# --- XDG resolution (nvim-mirrored layout) ---
+dirs = "7.0.0"
+
 # --- off-the-shelf input component (principal: prefer existing ones) ---
 tui-input = "0.15.5"
 

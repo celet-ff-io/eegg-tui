@@ -12,6 +12,7 @@ pub mod app;
 pub mod cli;
 pub mod core;
 pub mod events;
+pub mod paths;
 pub mod ui;
 
 use std::time::Duration;
@@ -23,8 +24,24 @@ use crate::app::App;
 use crate::cli::Cli;
 use crate::core::Core;
 
-/// Run the interface: spawn, handshake, event loop, teardown.
+/// Run the interface: logger, spawn, handshake, event loop, teardown.
 pub fn run(cli: &Cli) -> miette::Result<()> {
+    // The black-box log: everything goes to the FILE, nothing to the
+    // tty the UI owns — stderr carries only the post-restore death
+    // report. Env failure is loud (M0 refuses un-diagnosable sessions).
+    let log_file = paths::resolve_log_file(cli.log_file.as_deref())?;
+    let log_sink = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+        .into_diagnostic()?;
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(cli.verbose.log_level_filter().to_string()),
+    )
+    .target(env_logger::Target::Pipe(Box::new(log_sink)))
+    .init();
+    log::info!("session starting (log file {})", log_file.display());
+
     // Handshake failure = LOUD failure (human intervenes): the terminal
     // is still untouched here, so miette prints to the plain stderr.
     let cmdline = cli

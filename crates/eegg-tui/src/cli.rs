@@ -28,6 +28,11 @@ pub struct Cli {
     #[arg(long, value_name = "CMDLINE")]
     pub core: Option<String>,
 
+    /// Log file (the black-box). Defaults to `eegg.log` under the XDG
+    /// state dir (`~/.local/state/eegg/`).
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<std::path::PathBuf>,
+
     #[command(flatten)]
     pub verbose: Verbosity<WarnLevel>,
 }

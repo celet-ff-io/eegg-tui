@@ -22,6 +22,7 @@ prost-types.workspace = true
 bytes.workspace = true
 shlex.workspace = true
 jiff.workspace = true
+dirs.workspace = true
 tui-input.workspace = true
 crossbeam-channel.workspace = true
 tap.workspace = true

@@ -1,7 +1,9 @@
 {
   description = "eegg-tui";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # No ref suffix: the machine registry redirects the bare github input
+  # to the local nixpkgs mirror (offline-friendly; same shape as zconn).
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs";
 
   outputs =
     { self, ... }@inputs:

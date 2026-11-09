@@ -8,8 +8,8 @@
 
 use miette::IntoDiagnostic as _;
 use zconned_stdio_types::{
-    IncomingFrame, MsgDraftCommit, MsgDraftContentSet,
-    incoming_frame::Method, outgoing_frame::Frame as Out,
+    IncomingFrame, MsgDraftCommit, MsgDraftContentSet, incoming_frame::Method,
+    outgoing_frame::Frame as Out,
 };
 
 use eegg_tui::core::{Core, CoreStdout};
@@ -23,9 +23,7 @@ fn main() -> miette::Result<()> {
     core.handshake(&mut stdout)?;
     println!("handshake ok");
 
-    let mut send = |frame: IncomingFrame| -> miette::Result<()> {
-        Ok(core.write_frame(&frame)?)
-    };
+    let mut send = |frame: IncomingFrame| -> miette::Result<()> { Ok(core.write_frame(&frame)?) };
     let recv = |stdout: &mut CoreStdout| -> miette::Result<Out> {
         match stdout.read_frame::<zconned_stdio_types::OutgoingFrame>("OutgoingFrame")? {
             Some(f) => match f.frame {
@@ -55,7 +53,9 @@ fn main() -> miette::Result<()> {
     assert!(matches!(recv(&mut stdout)?, Out::MsgDraftPush(_)));
     println!("staged ok");
 
-    send(IncomingFrame { method: Some(Method::MsgDraftCommit(MsgDraftCommit {})) })?;
+    send(IncomingFrame {
+        method: Some(Method::MsgDraftCommit(MsgDraftCommit {})),
+    })?;
     assert!(matches!(recv(&mut stdout)?, Out::MsgAdded(_)));
     assert!(matches!(recv(&mut stdout)?, Out::MsgDraftPush(_)));
     println!("commit ok");

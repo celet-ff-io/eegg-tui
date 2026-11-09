@@ -1,7 +1,11 @@
 //! Command-line surface (English-only help; the luatalk-cli bin model).
 
 use clap::{
-    Parser, builder::{Styles, styling::{AnsiColor, Effects}},
+    Parser,
+    builder::{
+        Styles,
+        styling::{AnsiColor, Effects},
+    },
 };
 use clap_verbosity_flag::{Verbosity, WarnLevel};
 

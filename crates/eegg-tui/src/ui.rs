@@ -35,7 +35,11 @@ pub fn restore_terminal() {
 }
 
 fn focus_color(app: &App, pane: Pane) -> Color {
-    if app.focus == pane { Color::Yellow } else { Color::DarkGray }
+    if app.focus == pane {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    }
 }
 
 pub fn render(app: &mut App, f: &mut Frame) {
@@ -46,11 +50,8 @@ pub fn render(app: &mut App, f: &mut Frame) {
         Constraint::Length(1),
     ])
     .areas(f.area());
-    let [threads, transcript] = Layout::horizontal([
-        Constraint::Percentage(30),
-        Constraint::Percentage(70),
-    ])
-    .areas(main);
+    let [threads, transcript] =
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).areas(main);
 
     render_status(app, f, status);
     render_threads(app, f, threads);
@@ -72,13 +73,21 @@ fn render_status(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         Span::from(format!("cursor: {} base(s)", app.cursor.len())).cyan()
     };
     let error = app.last_error.as_ref().map(|e| {
-        Span::from(format!("error {}: {}", e.code, e.message)).red().bold()
+        Span::from(format!("error {}: {}", e.code, e.message))
+            .red()
+            .bold()
     });
     let flash = app.flash.as_ref().map(|m| Span::from(m).yellow());
     let extra = error.or(flash).unwrap_or_else(|| Span::from(""));
-    Line::from(vec![core, Span::from("  "), cursor, Span::from("  "), extra])
-        .centered()
-        .render(area, f.buffer_mut());
+    Line::from(vec![
+        core,
+        Span::from("  "),
+        cursor,
+        Span::from("  "),
+        extra,
+    ])
+    .centered()
+    .render(area, f.buffer_mut());
 }
 
 fn render_threads(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
@@ -106,12 +115,7 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
                 .border_style(focus_color(app, Pane::Transcript)),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    ratatui::widgets::StatefulWidget::render(
-        &list,
-        area,
-        f.buffer_mut(),
-        &mut app.transcript_sel,
-    );
+    ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.transcript_sel);
 }
 
 fn entry_item(e: &zconned_stdio_types::Entry) -> ListItem<'static> {
@@ -171,11 +175,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     } else {
         Line::from(Span::from(app.input.value().to_owned()).dark_gray())
     };
-    let paragraph = Paragraph::new(vec![
-        inner,
-        Line::from(Span::from(staged).dark_gray()),
-    ])
-    .block(
+    let paragraph = Paragraph::new(vec![inner, Line::from(Span::from(staged).dark_gray())]).block(
         Block::bordered()
             .title(" compose ")
             .border_style(focus_color(app, Pane::Compose)),
@@ -190,7 +190,9 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match app.focus {
-        Pane::Threads => "t refresh \u{00b7} Enter open \u{00b7} j/k move \u{00b7} Tab next pane \u{00b7} q quit",
+        Pane::Threads => {
+            "t refresh \u{00b7} Enter open \u{00b7} j/k move \u{00b7} Tab next pane \u{00b7} q quit"
+        }
         Pane::Transcript => "j/k scroll \u{00b7} r staged \u{00b7} Tab next pane \u{00b7} q quit",
         Pane::Compose => "type \u{00b7} Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
     };

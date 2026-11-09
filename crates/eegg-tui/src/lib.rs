@@ -35,7 +35,8 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
     let (mut core, stdout, stderr) =
         Core::spawn(&cmdline).wrap_err_with(|| format!("spawning core `{cmdline}`"))?;
     let mut stdout = core::CoreStdout::new(stdout);
-    core.handshake(&mut stdout).wrap_err("handshake with core")?;
+    core.handshake(&mut stdout)
+        .wrap_err("handshake with core")?;
 
     // A panic restores the terminal before the handler prints; the OS
     // closes our fds, so the core sees EOF and exits (1:1 axiom).
@@ -69,21 +70,17 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
         let _ = t.join();
     }
 
-    // Death report, after the screen is back.
+    // Death report, after the screen is back (the translator's exit
+    // discipline: a bad core status is an ERROR, not a forwarded code).
     for line in &app.core_stderr {
         eprintln!("core stderr: {line}");
     }
-    match exit {
-        Some(s) if s.success() => Ok(()),
-        Some(s) => {
-            eprintln!("core exited: {s}");
-            std::process::exit(s.code().unwrap_or(1));
-        }
-        None => {
-            eprintln!("core was not reaped");
-            std::process::exit(1);
-        }
+    let status = exit.ok_or_else(|| miette::miette!("core was not reaped"))?;
+    if !status.success() {
+        return Err(miette::miette!("core exited with a bad status: {status}"));
     }
+    log::info!("core exit 0");
+    Ok(())
 }
 
 fn run_loop(
@@ -98,10 +95,11 @@ fn run_loop(
         if app.core_alive && core.is_some() {
             for frame in std::mem::take(&mut app.outbox) {
                 if let Some(c) = core.as_mut()
-                    && let Err(e) = c.write_frame(&frame) {
-                        app.stream_broken(e.to_string());
-                        break;
-                    }
+                    && let Err(e) = c.write_frame(&frame)
+                {
+                    app.stream_broken(e.to_string());
+                    break;
+                }
             }
         } else {
             app.outbox.clear();

@@ -9,10 +9,10 @@ use std::{
 };
 
 use bytes::BytesMut;
+use miette::Diagnostic as _Diagnostic;
 use prost::Message;
 use protobuf_varint_deframer::Deframer;
 use thiserror::Error as ThisError;
-use miette::Diagnostic as _Diagnostic;
 use zconned_stdio_types::{Handshake, PROTOCOL_VERSION};
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -36,7 +36,10 @@ pub enum Error {
     TruncatedFrame,
 
     #[error("failed to decode {name}: {source}")]
-    Decode { name: &'static str, source: prost::DecodeError },
+    Decode {
+        name: &'static str,
+        source: prost::DecodeError,
+    },
 
     #[error("failed to write to core stdin: {source}")]
     Write { source: std::io::Error },
@@ -63,16 +66,22 @@ impl Core {
     /// Spawn the core child (piped stdio). stderr is piped too — the
     /// full-screen UI must never share the screen with core logs.
     pub fn spawn(cmdline: &str) -> Result<(Core, ChildStdout, ChildStderrStream)> {
-        let parts = shlex::split(cmdline).filter(|p| !p.is_empty()).ok_or_else(|| {
-            Error::Spawn { cmd: cmdline.into(), source: std::io::Error::other("empty core command") }
-        })?;
+        let parts = shlex::split(cmdline)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| Error::Spawn {
+                cmd: cmdline.into(),
+                source: std::io::Error::other("empty core command"),
+            })?;
         let mut child = Command::new(&parts[0])
             .args(&parts[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|source| Error::Spawn { cmd: cmdline.into(), source })?;
+            .map_err(|source| Error::Spawn {
+                cmd: cmdline.into(),
+                source,
+            })?;
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
@@ -81,10 +90,18 @@ impl Core {
 
     /// Handshake v2: we speak first; the core answers with its version.
     pub fn handshake(&mut self, stdout: &mut CoreStdout) -> Result<()> {
-        self.write_frame(&Handshake { version: PROTOCOL_VERSION })?;
+        self.write_frame(&Handshake {
+            version: PROTOCOL_VERSION,
+        })?;
         match stdout.read_frame::<Handshake>("Handshake")? {
-            Some(h) if h.version == PROTOCOL_VERSION => Ok(()),
-            Some(h) => Err(Error::HandshakeVersion { ours: PROTOCOL_VERSION, theirs: h.version }),
+            Some(h) if h.version == PROTOCOL_VERSION => {
+                log::info!("core handshake ok (version {PROTOCOL_VERSION})");
+                Ok(())
+            }
+            Some(h) => Err(Error::HandshakeVersion {
+                ours: PROTOCOL_VERSION,
+                theirs: h.version,
+            }),
             None => Err(Error::HandshakeEof),
         }
     }
@@ -99,6 +116,7 @@ impl Core {
     /// The ONLY legal shutdown: client EOF closes core stdin, then the
     /// reap. `wait()` is strictly after the stdin drop.
     pub fn shutdown(mut self) -> std::io::Result<std::process::ExitStatus> {
+        log::info!("core stdin dropped (EOF to core)");
         drop(self.stdin);
         self.child.wait()
     }
@@ -106,7 +124,11 @@ impl Core {
 
 impl CoreStdout {
     pub fn new(stream: ChildStdout) -> Self {
-        Self { stream, buf: BytesMut::new(), deframer: Deframer::builder().build() }
+        Self {
+            stream,
+            buf: BytesMut::new(),
+            deframer: Deframer::builder().build(),
+        }
     }
 
     /// Read one framed message; `None` = clean EOF on an idle deframer

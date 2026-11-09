@@ -13,15 +13,19 @@ use std::{
 
 use bytes::BytesMut;
 use clap::{
-    Parser, builder::{Styles, styling::{AnsiColor, Effects}},
+    Parser,
+    builder::{
+        Styles,
+        styling::{AnsiColor, Effects},
+    },
 };
 use clap_verbosity_flag::{Verbosity, WarnLevel};
 use prost::Message;
 use protobuf_varint_deframer::Deframer;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, ResourceRef, Value, resource_digest};
 use zconned_stdio_types::{
-    Handshake, IncomingFrame, OutgoingFrame, PROTOCOL_VERSION,
-    incoming_frame::Method, outgoing_frame::Frame as Out,
+    Handshake, IncomingFrame, OutgoingFrame, PROTOCOL_VERSION, incoming_frame::Method,
+    outgoing_frame::Frame as Out,
 };
 
 static STYLES: Styles = Styles::styled()
@@ -126,7 +130,10 @@ impl FakeCore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        pbjson_types::Timestamp { seconds: secs as i64, nanos: 0 }
+        pbjson_types::Timestamp {
+            seconds: secs as i64,
+            nanos: 0,
+        }
     }
 
     fn now_text(&self) -> String {
@@ -151,13 +158,21 @@ impl FakeCore {
                 state as u8
             })
             .collect();
-        MsgRef { ver_major: 1, ver_minor: 0, algo: "sha3-256".into(), digest }
+        MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: "sha3-256".into(),
+            digest,
+        }
     }
 
     fn resource(&mut self, value: &Value) -> ResourceRef {
         let digest = resource_digest(&value.kind, &value.data).to_vec();
         self.resources.insert(digest.clone(), value.clone());
-        ResourceRef { algo: "sha3-256".into(), digest }
+        ResourceRef {
+            algo: "sha3-256".into(),
+            digest,
+        }
     }
 
     fn draft_push(&self) -> Vec<OutgoingFrame> {
@@ -191,15 +206,18 @@ impl FakeCore {
                 self.cursor = match fresh {
                     Some(_) => {
                         let id = self.fresh_ref();
-                        self.threads.push(Thread { id: id.clone(), log: Vec::new() });
+                        self.threads.push(Thread {
+                            id: id.clone(),
+                            log: Vec::new(),
+                        });
                         vec![id]
                     }
                     None => at,
                 };
                 vec![OutgoingFrame {
-                    frame: Some(Out::MsgCursorPush(
-                        zconned_stdio_types::MsgCursorPush { refs: self.cursor.clone() },
-                    )),
+                    frame: Some(Out::MsgCursorPush(zconned_stdio_types::MsgCursorPush {
+                        refs: self.cursor.clone(),
+                    })),
                 }]
             }
             Method::MsgDraftContentSet(MsgDraftContentSet { kind, data }) => {
@@ -220,7 +238,10 @@ impl FakeCore {
                 // Registry kinds (vnd.zconn.*) are core-stamped: the
                 // draft carries them with empty data until commit.
                 let stamped = kind.starts_with("vnd.zconn.");
-                self.claims.push(Value { kind, data: if stamped { Vec::new() } else { data } });
+                self.claims.push(Value {
+                    kind,
+                    data: if stamped { Vec::new() } else { data },
+                });
                 self.draft_push()
             }
             Method::MsgDraftClaimsRemove(s) => {
@@ -286,7 +307,16 @@ impl FakeCore {
         let stamped: Vec<Value> = self
             .claims
             .iter()
-            .map(|c| if c.kind == CLAIM_KIND_TS { Value { kind: c.kind.clone(), data: self.now_text().into_bytes() } } else { c.clone() })
+            .map(|c| {
+                if c.kind == CLAIM_KIND_TS {
+                    Value {
+                        kind: c.kind.clone(),
+                        data: self.now_text().into_bytes(),
+                    }
+                } else {
+                    c.clone()
+                }
+            })
             .collect();
         let claims: Vec<ResolvedClaim> = stamped
             .iter()
@@ -308,7 +338,10 @@ impl FakeCore {
                 // machine; the shape is what matters for the shell.
                 digest: resource_digest("application/vnd.zconn.msg", &content_ref.digest).to_vec(),
             }),
-            content: Some(ResolvedSlot { r#ref: Some(content_ref), value: Some(content) }),
+            content: Some(ResolvedSlot {
+                r#ref: Some(content_ref),
+                value: Some(content),
+            }),
             claims,
         };
 
@@ -326,7 +359,11 @@ impl FakeCore {
         self.content = None;
         self.claims.clear();
 
-        let mut out = vec![OutgoingFrame { frame: Some(Out::MsgAdded(zconned_stdio_types::MsgAdded { entry: Some(entry) })) }];
+        let mut out = vec![OutgoingFrame {
+            frame: Some(Out::MsgAdded(zconned_stdio_types::MsgAdded {
+                entry: Some(entry),
+            })),
+        }];
         out.extend(self.draft_push());
         out
     }
@@ -337,10 +374,17 @@ fn serve(mut reader: Reader, mut stdout: impl std::io::Write) -> Result<()> {
         .read_frame::<Handshake>()?
         .ok_or(Framing::TruncatedFrame)?; // eof before handshake
     if theirs != PROTOCOL_VERSION {
-        eprintln!("handshake version mismatch: core speaks {PROTOCOL_VERSION}, client spoke {theirs}");
+        eprintln!(
+            "handshake version mismatch: core speaks {PROTOCOL_VERSION}, client spoke {theirs}"
+        );
         return Ok(());
     }
-    write_frame(&mut stdout, &Handshake { version: PROTOCOL_VERSION })?;
+    write_frame(
+        &mut stdout,
+        &Handshake {
+            version: PROTOCOL_VERSION,
+        },
+    )?;
     log::info!("handshake ok (version {PROTOCOL_VERSION})");
 
     let mut core = FakeCore::new();

@@ -11,8 +11,7 @@ use tui_input::backend::crossterm::EventHandler as _;
 use zconned_material::{MsgRef, Value};
 use zconned_stdio_types::{
     Entry, Error as FrameError, Fresh, IncomingFrame, MsgCursorSet, MsgDraftCommit,
-    MsgDraftContentSet, MsgDraftGet, MsgThreadsGet, MsgThreadsLogGet,
-    incoming_frame::Method,
+    MsgDraftContentSet, MsgDraftGet, MsgThreadsGet, MsgThreadsLogGet, incoming_frame::Method,
     outgoing_frame::Frame as Out,
 };
 
@@ -197,7 +196,8 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => match self.focus {
                 Pane::Threads => {
                     let n = self.threads.len();
-                    self.thread_sel.select(if n > 0 { Some(n - 1) } else { None });
+                    self.thread_sel
+                        .select(if n > 0 { Some(n - 1) } else { None });
                 }
                 Pane::Transcript => {
                     let n = self.entries.len();
@@ -228,7 +228,10 @@ impl App {
             Some(Out::MsgThreadsPush(p)) => {
                 self.threads = p.threads.into_iter().filter_map(|t| t.thread).collect();
                 let n = self.threads.len();
-                let sel = self.thread_sel.selected().map(|i| i.min(n.saturating_sub(1)));
+                let sel = self
+                    .thread_sel
+                    .selected()
+                    .map(|i| i.min(n.saturating_sub(1)));
                 self.thread_sel.select(sel.filter(|_| n > 0));
             }
             Some(Out::MsgThreadsLogPush(p)) => {

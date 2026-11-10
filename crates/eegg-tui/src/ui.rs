@@ -157,8 +157,12 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
     ];
     let lines: Vec<Line> = rows
         .iter()
-        .map(|(row, key, desc)| {
-            if *row {
+        .enumerate()
+        .flat_map(|(i, (row, key, desc))| {
+            // Every section break carries a blank line before it
+            // (the first header sits at the top — no blank there).
+            let blank = (i > 0 && !row).then(|| Line::from(Span::from("")));
+            let line = if *row {
                 // lazygit style: the key column right-aligned, the
                 // description tight against it.
                 Line::from(vec![
@@ -172,7 +176,8 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
                 Line::from(
                     Span::from(format!("{:-^70}", format!(" {} ", key.to_uppercase()))).dark_gray(),
                 )
-            }
+            };
+            blank.into_iter().chain(std::iter::once(line))
         })
         .collect();
     // A short terminal: the card scrolls (j/k) instead of clipping.

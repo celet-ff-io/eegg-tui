@@ -1,5 +1,9 @@
 [workspace]
 members = ["crates/*"]
+# The 106 symlink farm is INSIDE the root dir; without the exclude,
+# cargo claims those path deps for THIS workspace (lexical path
+# membership) and their `workspace = true` inheritance breaks.
+exclude = ["local-deps"]
 resolver = "3"
 
 [workspace.package]
@@ -18,9 +22,17 @@ rust-version = "1.98"
 # Note: zconned-io-link (the 106 async/tokio adapter) is deliberately
 # NOT consumed — C2 model runs no async runtime; the reader threads use
 # the SYNC deframer state machine directly.
-protobuf-varint-deframer = { path = "../../../lpz106/code/zconn/crates/protobuf-varint-deframer" }
-zconned-stdio-types = { path = "../../../lpz106/code/zconn/crates/zconned-stdio-types" }
-zconned-material = { path = "../../../lpz106/code/zconn/crates/zconned-material" }
+# The paths go through the gitignored `local-deps/` directory: a
+# symlink to a whole sibling LPZ106 zconn checkout (NOT per-crate
+# links — cargo resolves a dep's workspace inheritance by walking up
+# the LINK path, so a bare crate link would fall into THIS workspace;
+# linking the whole zconn keeps its own root workspace in the walk).
+# After a fresh clone, recreate it:
+#   mkdir -p local-deps && \
+#     ln -s ../../../../lpz106/code/zconn local-deps/zconn
+protobuf-varint-deframer = { path = "local-deps/zconn/crates/protobuf-varint-deframer" }
+zconned-stdio-types = { path = "local-deps/zconn/crates/zconned-stdio-types" }
+zconned-material = { path = "local-deps/zconn/crates/zconned-material" }
 
 # --- wire + link glue ---
 prost = "0.14.4"

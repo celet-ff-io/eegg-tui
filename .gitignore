@@ -4,3 +4,4 @@
 .direnv.*
 result
 result-*
+/local-deps/

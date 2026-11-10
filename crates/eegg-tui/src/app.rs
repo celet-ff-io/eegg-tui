@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use ratatui::widgets::ListState;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
-use zconned_material::{MsgRef, Value};
+use zconned_material::{MsgRef, Value, CLAIM_KIND_TS};
 use zconned_stdio_types::{
     Entry, Error as FrameError, Fresh, IncomingFrame, MsgCursorSet, MsgDraftCommit,
     MsgDraftContentSet, MsgDraftGet, MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet, PeersGet,
@@ -96,6 +96,13 @@ pub struct App {
     pub awaiting_commit: bool,
     /// The per-counterpart receipt frontiers (the mail_acked stream).
     pub acked: Vec<Acked>,
+    /// The compose text waiting for the stamp row's receipt (the
+    /// timestamp discipline queues the text while the stamp message
+    /// commits first).
+    pub pending_text: Option<String>,
+    /// The last timestamp-stamp send. `None` or older than the stamp
+    /// window = the next text send stamps first.
+    pub ts_stamped_at: Option<jiff::Timestamp>,
     pub last_error: Option<FrameError>,
     /// One-shot notice (commit receipt / resource answer / write failure).
     pub flash: Option<String>,
@@ -160,6 +167,8 @@ impl App {
             file_input: Input::default(),
             file_box: FileBox::None,
             sent: Vec::new(),
+            pending_text: None,
+            ts_stamped_at: None,
             awaiting_commit: false,
             acked: Vec::new(),
             last_error: None,
@@ -379,32 +388,83 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if self.cursor.is_empty() {
-            let reply_base = if self.new_thread_intent {
-                None
-            } else {
-                self.open_thread_tip()
-            };
-            match reply_base {
-                Some(tip) => {
-                    self.outbox.push(IncomingFrame {
-                        method: Some(Method::MsgCursorSet(MsgCursorSet {
-                            at: vec![tip],
-                            fresh: None,
-                        })),
-                    });
-                }
-                None => {
-                    self.outbox.push(IncomingFrame {
-                        method: Some(Method::MsgCursorSet(MsgCursorSet {
-                            at: Vec::new(),
-                            fresh: Some(Fresh {}),
-                        })),
-                    });
-                }
-            }
+        self.input.reset();
+        // The timestamp discipline: the interface keeps the
+        // "stamped" state (a stamp within the last window). When the
+        // state is down, a stamp MESSAGE commits first and the text
+        // waits for its receipt (the stamp's digest is the text's
+        // chain parent — unknowable until the receipt arrives).
+        if self.stamp_needed() {
+            self.send_stamp();
+            self.awaiting_commit = true;
+            self.pending_text = Some(text);
+            return;
         }
+        self.send_text(text);
+    }
+
+    /// Whether the stamp state is down: never stamped, or the last
+    /// stamp is older than the window (five minutes — the interface
+    /// clears the state by aging it out; a timer and this aging are
+    /// observably identical).
+    fn stamp_needed(&self) -> bool {
+        const STAMP_WINDOW_SECS: i64 = 5 * 60;
+        self.ts_stamped_at.is_none_or(|t| {
+            jiff::Timestamp::now().as_second() - t.as_second() >= STAMP_WINDOW_SECS
+        })
+    }
+
+    /// The position intent precedes EVERY commit: the core keeps its
+    /// cursor across commits, so an unstated position would chain
+    /// from a stale parent and fork the thread.
+    fn push_cursor_intent(&mut self) {
+        let reply_base = if self.new_thread_intent {
+            None
+        } else {
+            self.open_thread_tip()
+        };
+        let set = match reply_base {
+            Some(tip) => MsgCursorSet {
+                at: vec![tip],
+                fresh: None,
+            },
+            None => MsgCursorSet {
+                at: Vec::new(),
+                fresh: Some(Fresh {}),
+            },
+        };
         self.new_thread_intent = false;
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::MsgCursorSet(set)),
+        });
+    }
+
+    /// The stamp message: empty text content + the core-attested
+    /// timestamp claim (the core stamps the RFC3339 commit time at
+    /// commit; the interface carries no value).
+    fn send_stamp(&mut self) {
+        self.push_cursor_intent();
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::MsgDraftContentSet(MsgDraftContentSet {
+                kind: "text/plain".into(),
+                data: Vec::new(),
+            })),
+        });
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::MsgDraftClaimsAdd(zconned_stdio_types::MsgDraftClaimsAdd {
+                kind: CLAIM_KIND_TS.into(),
+                data: Vec::new(),
+            })),
+        });
+        self.awaiting_commit = true;
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::MsgDraftCommit(MsgDraftCommit {})),
+        });
+        self.ts_stamped_at = Some(jiff::Timestamp::now());
+    }
+
+    fn send_text(&mut self, text: String) {
+        self.push_cursor_intent();
         self.outbox.push(IncomingFrame {
             method: Some(Method::MsgDraftContentSet(MsgDraftContentSet {
                 kind: "text/plain".into(),
@@ -415,7 +475,6 @@ impl App {
         self.outbox.push(IncomingFrame {
             method: Some(Method::MsgDraftCommit(MsgDraftCommit {})),
         });
-        self.input.reset();
     }
 
     /// Whether the row with this digest is confirmed received: it was
@@ -780,6 +839,13 @@ impl App {
                         }
                         self.refresh_threads();
                         self.flash = Some("msg arrived".into());
+                    }
+                    // A stamp receipt releases the queued text: the
+                    // tip now includes the stamp row, so the text's
+                    // position intent addresses it (its chain
+                    // parent).
+                    if let Some(text) = self.pending_text.take() {
+                        self.send_text(text);
                     }
                 }
             }

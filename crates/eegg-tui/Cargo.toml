@@ -12,6 +12,7 @@ name = "eegg"
 path = "src/main.rs"
 
 [dependencies]
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 protobuf-varint-deframer.workspace = true
 zconned-stdio-types.workspace = true
 zconned-material.workspace = true

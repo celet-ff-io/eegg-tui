@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod clipboard;
 pub mod core;
 pub mod events;
 pub mod paths;

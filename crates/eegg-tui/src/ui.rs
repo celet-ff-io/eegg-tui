@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use crate::app::{App, Pane, preview_bytes, short_hex};
+use crate::app::{App, CardFlow, Pane, preview_bytes, short_hex};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -90,21 +90,35 @@ fn render_log_popup(app: &App, f: &mut Frame) {
 }
 
 /// The peers popup: the core's own card on top (copy source), the
-/// send-target set in the middle, the paste-in input at the bottom.
+/// send-target set in the middle, the card/file box at the bottom.
 fn render_peers_popup(app: &mut App, f: &mut Frame) {
     let area = centered(f.area(), 70, 60);
     f.render_widget(Clear, area);
     let [card, list, input] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
-        Constraint::Length(if app.peer_input_active { 3 } else { 0 }),
+        Constraint::Length(if app.card_flow != CardFlow::None {
+            3
+        } else {
+            0
+        }),
     ])
     .areas(area);
 
+    // The card box shows TWO text lines: a longer card is clipped
+    // with an explicit ellipsis — the full text travels through c
+    // (clipboard) / s (file), never through the screen.
     let card_text = app.self_card.clone().unwrap_or_else(|| "(no card)".into());
-    Paragraph::new(Line::from(Span::from(card_text).cyan()))
+    let capacity = card.width.saturating_sub(2) as usize * 2;
+    let shown = if card_text.chars().count() > capacity {
+        let kept: String = card_text.chars().take(capacity.saturating_sub(1)).collect();
+        format!("{kept}\u{2026}")
+    } else {
+        card_text
+    };
+    Paragraph::new(Line::from(Span::from(shown).cyan()))
         .wrap(ratatui::widgets::Wrap { trim: false })
-        .block(Block::bordered().title(" my card (copy for your counterpart) "))
+        .block(Block::bordered().title(" my card — c copy · s save to file "))
         .render(card, f.buffer_mut());
 
     let items: Vec<ListItem> = app
@@ -130,31 +144,77 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     ratatui::widgets::StatefulWidget::render(&list_w, list, f.buffer_mut(), &mut app.peers_sel);
 
-    if app.peer_input_active {
-        // A card is one long base64 line: the visible window follows
-        // the caret (horizontal scroll), otherwise the tail is
-        // unseeable.
-        let prefix = "paste card> ";
-        let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
-        let scroll = app.peer_input.visual_scroll(text_width);
-        let visible: String = app
-            .peer_input
-            .value()
-            .chars()
-            .skip(scroll)
-            .take(text_width)
-            .collect();
-        let caret = app.peer_input.visual_cursor() - scroll;
+    if app.card_flow != CardFlow::None {
+        let (title, prefix, value, caret_col) = match app.card_flow {
+            // A card is one long base64 line: the visible window
+            // follows the caret (horizontal scroll), otherwise the
+            // tail is unseeable.
+            CardFlow::InputCard => {
+                let prefix = "paste card> ";
+                let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+                let scroll = app.peer_input.visual_scroll(text_width);
+                let visible: String = app
+                    .peer_input
+                    .value()
+                    .chars()
+                    .skip(scroll)
+                    .take(text_width)
+                    .collect();
+                let caret = app.peer_input.visual_cursor() - scroll;
+                (
+                    " add peer: Enter submit · Ctrl-V clipboard · Ctrl-R file · Esc cancel ",
+                    prefix,
+                    visible,
+                    caret as u16,
+                )
+            }
+            CardFlow::ReadCard => {
+                let prefix = "card file> ";
+                let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+                let scroll = app.file_input.visual_scroll(text_width);
+                let visible: String = app
+                    .file_input
+                    .value()
+                    .chars()
+                    .skip(scroll)
+                    .take(text_width)
+                    .collect();
+                let caret = app.file_input.visual_cursor() - scroll;
+                (
+                    " read card from file: Enter load · Esc back ",
+                    prefix,
+                    visible,
+                    caret as u16,
+                )
+            }
+            CardFlow::SaveCard => {
+                let prefix = "save to> ";
+                let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+                let scroll = app.file_input.visual_scroll(text_width);
+                let visible: String = app
+                    .file_input
+                    .value()
+                    .chars()
+                    .skip(scroll)
+                    .take(text_width)
+                    .collect();
+                let caret = app.file_input.visual_cursor() - scroll;
+                (
+                    " save my card to file (~/ expands): Enter save · Esc back ",
+                    prefix,
+                    visible,
+                    caret as u16,
+                )
+            }
+            CardFlow::None => unreachable!("checked above"),
+        };
         Paragraph::new(Line::from(vec![
             Span::from(prefix).yellow(),
-            Span::from(visible),
+            Span::from(value),
         ]))
-        .block(Block::bordered().title(" add peer "))
+        .block(Block::bordered().title(title))
         .render(input, f.buffer_mut());
-        f.set_cursor_position((
-            input.x + 1 + prefix.len() as u16 + caret as u16,
-            input.y + 1,
-        ));
+        f.set_cursor_position((input.x + 1 + prefix.len() as u16 + caret_col, input.y + 1));
     }
 }
 

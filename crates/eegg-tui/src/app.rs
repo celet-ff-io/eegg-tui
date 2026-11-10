@@ -15,8 +15,20 @@ use zconned_stdio_types::{
     SelfGet, incoming_frame::Method, outgoing_frame::Frame as Out,
 };
 
+use crate::clipboard;
 use crate::core::Process;
 use crate::events::Evt;
+
+/// Which bottom box the peers popup shows: the pasted-card input,
+/// the read-card-from-file path box, or the save-card-to-file path
+/// box. `None` = the plain list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardFlow {
+    None,
+    InputCard,
+    ReadCard,
+    SaveCard,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -51,7 +63,11 @@ pub struct App {
     pub show_peers: bool,
     pub peers_sel: ListState,
     pub peer_input: Input,
-    pub peer_input_active: bool,
+    /// The active bottom box in the peers popup.
+    pub card_flow: CardFlow,
+    /// The file-path box's text (for `read card from` / `save card
+    /// to`).
+    pub file_input: Input,
     /// This session's sent rows: (content digest, was mailed) — a
     /// commit mails only when the target set is non-empty. The ordinal
     /// in this vector = the row's chain seq within the session.
@@ -120,7 +136,8 @@ impl App {
             show_peers: false,
             peers_sel: ListState::default(),
             peer_input: Input::default(),
-            peer_input_active: false,
+            card_flow: CardFlow::None,
+            file_input: Input::default(),
             sent: Vec::new(),
             awaiting_commit: false,
             acked: Vec::new(),
@@ -214,6 +231,24 @@ impl App {
             });
             self.focus = Pane::Transcript;
         }
+    }
+
+    /// The path box's text with a leading `~/` expanded (the only
+    /// tilde form honored; a bare `~` = the home dir).
+    fn expanded_path(&self) -> Option<std::path::PathBuf> {
+        let raw = self.file_input.value().trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = if raw == "~" {
+            home
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            format!("{home}/{rest}")
+        } else {
+            raw.to_owned()
+        };
+        Some(std::path::PathBuf::from(path))
     }
 
     /// The thread continuation base for a reply: the transcript's
@@ -317,11 +352,12 @@ impl App {
     /// Keys while the peers popup is up; `false` = the popup closed
     /// (the caller's key handling ends here).
     fn on_key_peers(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
-        use ratatui::crossterm::event::{Event, KeyCode};
-        match (self.peer_input_active, key.code) {
-            // Typing the pasted card: Enter submits, Esc cancels the
-            // input (a second Esc closes the popup).
-            (true, KeyCode::Enter) => {
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        match (self.card_flow, key.code) {
+            // Typing the pasted card: Ctrl-V = paste from the
+            // clipboard (the file channel is Ctrl-R), Enter submits,
+            // Esc cancels back to the list.
+            (CardFlow::InputCard, KeyCode::Enter) => {
                 let card = self.peer_input.value().trim().to_owned();
                 if !card.is_empty() {
                     self.outbox.push(IncomingFrame {
@@ -331,35 +367,121 @@ impl App {
                         })),
                     });
                     self.peer_input.reset();
-                    self.peer_input_active = false;
+                    self.card_flow = CardFlow::None;
                     self.flash = Some("peer submitted".into());
                 }
             }
-            (true, KeyCode::Esc) => {
-                self.peer_input.reset();
-                self.peer_input_active = false;
+            (CardFlow::InputCard, KeyCode::Char('v'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                match clipboard::get() {
+                    Ok(text) => {
+                        self.peer_input.reset();
+                        for c in text.trim().chars() {
+                            self.peer_input
+                                .handle_event(&Event::Key(KeyEvent::from(KeyCode::Char(c))));
+                        }
+                        self.flash = Some("pasted from clipboard".into());
+                    }
+                    Err(reason) => self.flash = Some(reason),
+                }
             }
-            (true, _) => {
+            (CardFlow::InputCard, KeyCode::Char('r'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.file_input.reset();
+                self.card_flow = CardFlow::ReadCard;
+            }
+            (CardFlow::InputCard, KeyCode::Esc) => {
+                self.peer_input.reset();
+                self.card_flow = CardFlow::None;
+            }
+            (CardFlow::InputCard, _) => {
                 self.peer_input.handle_event(&Event::Key(key));
             }
+            // The file-path box (read a card from, or save the card
+            // to): Enter acts, Esc goes back a level.
+            (CardFlow::ReadCard, KeyCode::Enter) => {
+                let path = self.expanded_path();
+                match path.map(|p| std::fs::read_to_string(&p)) {
+                    Some(Ok(text)) => {
+                        self.peer_input.reset();
+                        for c in text.trim().chars() {
+                            self.peer_input
+                                .handle_event(&Event::Key(KeyEvent::from(KeyCode::Char(c))));
+                        }
+                        self.card_flow = CardFlow::InputCard;
+                        self.flash = Some("card loaded from file".into());
+                    }
+                    Some(Err(e)) => self.flash = Some(format!("read failed: {e}")),
+                    None => self.flash = Some("no path given".into()),
+                }
+            }
+            (CardFlow::SaveCard, KeyCode::Enter) => {
+                let Some(card) = self.self_card.clone() else {
+                    self.flash = Some("no card to save".into());
+                    return true;
+                };
+                let path = self.expanded_path();
+                match path {
+                    Some(p) => match std::fs::write(&p, format!("{card}\n")) {
+                        Ok(()) => {
+                            self.flash = Some(format!("card saved to {}", p.display()));
+                            self.file_input.reset();
+                            self.card_flow = CardFlow::None;
+                        }
+                        Err(e) => self.flash = Some(format!("save failed: {e}")),
+                    },
+                    None => self.flash = Some("no path given".into()),
+                }
+            }
+            (CardFlow::ReadCard | CardFlow::SaveCard, KeyCode::Esc) => {
+                self.file_input.reset();
+                self.card_flow = CardFlow::None;
+            }
+            (CardFlow::ReadCard | CardFlow::SaveCard, _) => {
+                self.file_input.handle_event(&Event::Key(key));
+            }
             // Listing posture.
-            (false, KeyCode::Char('a')) => self.peer_input_active = true,
-            (false, KeyCode::Up | KeyCode::Char('k')) => {
+            (CardFlow::None, KeyCode::Char('a')) => {
+                self.peer_input.reset();
+                self.card_flow = CardFlow::InputCard;
+            }
+            // Copy the core's own card to the clipboard (may be
+            // unavailable — the file channel is the fallback).
+            (CardFlow::None, KeyCode::Char('c')) => {
+                self.flash = Some(match self.self_card.as_deref() {
+                    Some(card) => clipboard::set(card)
+                        .map(|()| "card copied to clipboard".to_owned())
+                        .unwrap_or_else(|reason| format!("{reason} — use s to save a file")),
+                    None => "no card to copy".into(),
+                });
+            }
+            // Save the core's own card to a file.
+            (CardFlow::None, KeyCode::Char('s')) => {
+                if self.self_card.is_some() {
+                    self.file_input.reset();
+                    self.card_flow = CardFlow::SaveCard;
+                } else {
+                    self.flash = Some("no card to save".into());
+                }
+            }
+            (CardFlow::None, KeyCode::Up | KeyCode::Char('k')) => {
                 let n = self.peers.len();
                 let i = self.peers_sel.selected().unwrap_or(0);
                 self.peers_sel
                     .select((n > 0).then_some(i.saturating_sub(1)));
             }
-            (false, KeyCode::Down | KeyCode::Char('j')) => {
+            (CardFlow::None, KeyCode::Down | KeyCode::Char('j')) => {
                 let n = self.peers.len();
                 let i = self.peers_sel.selected().unwrap_or(0);
                 self.peers_sel.select((n > 0).then_some((i + 1).min(n - 1)));
             }
-            (false, KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q')) => {
+            (CardFlow::None, KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q')) => {
                 self.show_peers = false;
                 return false;
             }
-            (false, _) => {}
+            (CardFlow::None, _) => {}
         }
         true
     }
@@ -431,7 +553,7 @@ impl App {
             // refresh per open (cheap, and the set is small).
             KeyCode::Char('p') => {
                 self.show_peers = true;
-                self.peer_input_active = false;
+                self.card_flow = CardFlow::None;
                 self.peers_sel.select((!self.peers.is_empty()).then_some(0));
                 self.refresh_peers();
                 self.refresh_self();

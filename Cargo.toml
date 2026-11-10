@@ -23,11 +23,15 @@ rust-version = "1.98"
 # NOT consumed — C2 model runs no async runtime; the reader threads use
 # the SYNC deframer state machine directly.
 # The paths go through the gitignored `local-deps/` directory: a
-# symlink to a whole sibling LPZ106 zconn checkout (NOT per-crate
-# links — cargo resolves a dep's workspace inheritance by walking up
-# the LINK path, so a bare crate link would fall into THIS workspace;
-# linking the whole zconn keeps its own root workspace in the walk).
-# After a fresh clone, recreate it:
+# symlink to a zconn checkout AT WHATEVER LOCATION THE MACHINE KEEPS
+# IT — every machine's project layout differs, and this one link is
+# the only per-machine adaptation (the manifests stay
+# machine-independent). The link targets the WHOLE zconn tree, not
+# per-crate copies: cargo resolves a dep's workspace inheritance by
+# walking up the LINK path, so a bare crate link would fall into THIS
+# workspace; the whole tree keeps zconn's own root workspace in the
+# walk. After a fresh clone, recreate it (this machine's layout as
+# the example):
 #   mkdir -p local-deps && \
 #     ln -s ../../../../lpz106/code/zconn local-deps/zconn
 protobuf-varint-deframer = { path = "local-deps/zconn/crates/protobuf-varint-deframer" }

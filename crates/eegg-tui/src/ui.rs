@@ -159,16 +159,19 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         .iter()
         .map(|(row, key, desc)| {
             if *row {
+                // lazygit style: the key column right-aligned, the
+                // description tight against it.
                 Line::from(vec![
                     Span::from(" "),
-                    Span::from(format!("{key:<12}")).yellow(),
+                    Span::from(format!("{key:>12} ")).yellow(),
                     Span::from(desc.to_owned()),
                 ])
             } else {
-                Line::from(vec![
-                    Span::from(" "),
-                    Span::from(key.to_uppercase()).bold().light_blue(),
-                ])
+                // The section break: a full-width rule with the
+                // panel's name in the middle.
+                Line::from(
+                    Span::from(format!("{:-^70}", format!(" {} ", key.to_uppercase()))).dark_gray(),
+                )
             }
         })
         .collect();

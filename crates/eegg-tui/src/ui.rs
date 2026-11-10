@@ -79,7 +79,10 @@ fn render_log_popup(app: &App, f: &mut Frame) {
     Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(format!(" core stderr (last {}) — l closes ", app.core_stderr.len()))
+                .title(format!(
+                    " core stderr (last {}) — l closes ",
+                    app.core_stderr.len()
+                ))
                 .border_style(Color::Yellow),
         )
         .wrap(ratatui::widgets::Wrap { trim: false })
@@ -128,19 +131,30 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
     ratatui::widgets::StatefulWidget::render(&list_w, list, f.buffer_mut(), &mut app.peers_sel);
 
     if app.peer_input_active {
+        // A card is one long base64 line: the visible window follows
+        // the caret (horizontal scroll), otherwise the tail is
+        // unseeable.
+        let prefix = "paste card> ";
+        let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+        let scroll = app.peer_input.visual_scroll(text_width);
+        let visible: String = app
+            .peer_input
+            .value()
+            .chars()
+            .skip(scroll)
+            .take(text_width)
+            .collect();
+        let caret = app.peer_input.visual_cursor() - scroll;
         Paragraph::new(Line::from(vec![
-            Span::from("paste card> ").yellow(),
-            Span::from(app.peer_input.value().to_owned()),
+            Span::from(prefix).yellow(),
+            Span::from(visible),
         ]))
         .block(Block::bordered().title(" add peer "))
         .render(input, f.buffer_mut());
-        let col = input.x
-            + 12
-            + app
-                .peer_input
-                .visual_cursor()
-                .min(input.width.saturating_sub(13) as usize) as u16;
-        f.set_cursor_position((col, input.y + 1));
+        f.set_cursor_position((
+            input.x + 1 + prefix.len() as u16 + caret as u16,
+            input.y + 1,
+        ));
     }
 }
 
@@ -304,13 +318,26 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         }
         None => "staged: (nothing)".into(),
     };
-    let inner = if app.focus == Pane::Compose {
-        Line::from(vec![
-            Span::from("> ").yellow(),
-            Span::from(app.input.value().to_owned()),
-        ])
+    // The visible window follows the caret — long lines scroll
+    // horizontally instead of hiding their tail.
+    let text_width = area.width.saturating_sub(4) as usize; // borders + "> "
+    let (visible, caret_col) = if app.focus == Pane::Compose {
+        let scroll = app.input.visual_scroll(text_width);
+        let v: String = app
+            .input
+            .value()
+            .chars()
+            .skip(scroll)
+            .take(text_width)
+            .collect();
+        (v, app.input.visual_cursor() - scroll)
     } else {
-        Line::from(Span::from(app.input.value().to_owned()).dark_gray())
+        (app.input.value().to_owned(), 0)
+    };
+    let inner = if app.focus == Pane::Compose {
+        Line::from(vec![Span::from("> ").yellow(), Span::from(visible)])
+    } else {
+        Line::from(Span::from(visible).dark_gray())
     };
     let paragraph = Paragraph::new(vec![inner, Line::from(Span::from(staged).dark_gray())]).block(
         Block::bordered()
@@ -320,8 +347,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     paragraph.render(area, f.buffer_mut());
     if app.focus == Pane::Compose {
         // The terminal cursor tracks the input caret.
-        let col = area.x + 2 + app.input.visual_cursor().min(area.width as usize - 3) as u16;
-        f.set_cursor_position((col, area.y + 1));
+        f.set_cursor_position((area.x + 2 + caret_col as u16, area.y + 1));
     }
 }
 

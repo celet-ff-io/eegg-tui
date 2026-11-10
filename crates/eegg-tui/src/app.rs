@@ -558,8 +558,9 @@ impl App {
                 // verb it does not know — a stale core build.
                 let mut e = e;
                 if e.code == "internal" && e.message == "no op in frame" {
-                    e.message = "stale core build — rebuild it: cargo build -p zconned --bin zconned"
-                        .into();
+                    e.message =
+                        "stale core build — rebuild it: cargo build -p zconned --bin zconned"
+                            .into();
                 }
                 self.last_error = Some(e);
                 self.flash = None;

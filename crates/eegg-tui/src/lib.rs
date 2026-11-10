@@ -15,7 +15,10 @@ pub mod events;
 pub mod paths;
 pub mod ui;
 
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use miette::{Context as _, IntoDiagnostic as _};
@@ -68,19 +71,26 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
     let mut term = ui::init_terminal()?;
 
     let (tx, rx) = crossbeam_channel::unbounded::<events::Evt>();
-    let input_thread = events::spawn_input(tx.clone());
+    let input_stop = std::sync::Arc::new(AtomicBool::new(false));
+    let input_thread = events::spawn_input(tx.clone(), input_stop.clone());
     let reader_thread = events::spawn_reader(stdout, tx.clone());
     let stderr_thread = events::spawn_stderr_drain(stderr, tx.clone());
     drop(tx); // the three producers hold the senders now
 
     let mut core = Some(core);
     let mut app = App::new();
-    app.session_open(); // the first hand-typed requests
+    app.relayed = cli.relay.is_some();
+    app.session_open(app.relayed); // the first hand-typed requests
     run_loop(&mut core, &mut app, &rx, &mut term)?;
 
-    // Teardown order: restore terminal → drop stdin → reader join →
-    // wait().
+    // Teardown order: restore terminal → channel closed → core stdin
+    // dropped (the ONLY legal shutdown) → thread joins → wait(). The
+    // channel dies FIRST so pending producer sends fail fast, and the
+    // input thread (poll-based) sees the stop flag within ~100 ms —
+    // a blocking reader could never be joined after quit.
     ui::restore_terminal();
+    drop(rx);
+    input_stop.store(true, Ordering::Relaxed);
     let exit = core
         .take()
         .map(|c| c.shutdown().into_diagnostic())

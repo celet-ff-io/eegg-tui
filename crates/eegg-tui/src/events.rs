@@ -1,7 +1,11 @@
 //! Event plumbing: producer threads feed one channel; the main loop
 //! is the sole consumer (and the sole core-stdin writer).
 
-use std::thread::JoinHandle;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use crossbeam_channel::Sender;
 use zconned_stdio_types::OutgoingFrame;
@@ -23,13 +27,21 @@ pub enum Evt {
     CoreGone(Option<CoreError>),
 }
 
-/// Terminal input → events. Ends when the channel closes (main exit).
-pub fn spawn_input(tx: Sender<Evt>) -> JoinHandle<()> {
-    use ratatui::crossterm::event::{Event, read};
+/// Terminal input → events. Poll-based so the stop flag is honored
+/// within ~100 ms — a blocking read could never be joined at exit
+/// (nothing presses a key after quit) and joining it froze teardown.
+pub fn spawn_input(tx: Sender<Evt>, stop: std::sync::Arc<AtomicBool>) -> JoinHandle<()> {
+    use ratatui::crossterm::event::{Event, poll, read};
     std::thread::Builder::new()
         .name("input".into())
         .spawn(move || {
             loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if !poll(Duration::from_millis(100)).unwrap_or(false) {
+                    continue;
+                }
                 match read() {
                     Ok(Event::Key(k)) => {
                         if tx.send(Evt::Key(k)).is_err() {

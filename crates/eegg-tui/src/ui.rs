@@ -61,6 +61,29 @@ pub fn render(app: &mut App, f: &mut Frame) {
     if app.show_peers {
         render_peers_popup(app, f);
     }
+    if app.show_log {
+        render_log_popup(app, f);
+    }
+}
+
+/// The core's stderr ring — the diagnosis window. The core logs
+/// nothing at the default level; a talky core: `--core "zconned -v"`.
+fn render_log_popup(app: &App, f: &mut Frame) {
+    let area = centered(f.area(), 80, 60);
+    f.render_widget(Clear, area);
+    let lines: Vec<Line> = app
+        .core_stderr
+        .iter()
+        .map(|l| Line::from(Span::from(l.trim_end().to_owned())).dark_gray())
+        .collect();
+    Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(format!(" core stderr (last {}) — l closes ", app.core_stderr.len()))
+                .border_style(Color::Yellow),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .render(area, f.buffer_mut());
 }
 
 /// The peers popup: the core's own card on top (copy source), the
@@ -134,6 +157,7 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
 
 fn render_status(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let core = match (&app.core_exit, app.core_alive) {
+        (_, true) if app.relayed => Span::from("core: alive · relay: on").green(),
         (_, true) => Span::from("core: alive").green(),
         (Some(s), _) if s.success() => Span::from("core: exited clean").dark_gray(),
         (Some(s), _) => Span::from(format!("core: exited {s}")).red(),
@@ -197,7 +221,11 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
         .entries
         .iter()
         .map(|e| {
-            let digest = e.meta.as_ref().map(|m| m.digest.clone()).unwrap_or_default();
+            let digest = e
+                .meta
+                .as_ref()
+                .map(|m| m.digest.clone())
+                .unwrap_or_default();
             entry_item(e, app.row_received(&digest))
         })
         .collect();
@@ -254,12 +282,14 @@ fn entry_item(e: &zconned_stdio_types::Entry, received: Option<bool>) -> ListIte
     }
     line.push(Span::from("  "));
     line.push(Span::from(content.unwrap_or_else(|| "(no content)".into())));
-    line.push(Span::from(if claims.is_empty() {
-        String::new()
-    } else {
-        format!("   [{claims}]")
-    })
-    .dark_gray());
+    line.push(
+        Span::from(if claims.is_empty() {
+            String::new()
+        } else {
+            format!("   [{claims}]")
+        })
+        .dark_gray(),
+    );
     ListItem::from(Line::from(line))
 }
 
@@ -298,10 +328,10 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match app.focus {
         Pane::Threads => {
-            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} Tab next \u{00b7} q quit"
+            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} q quit"
         }
         Pane::Transcript => {
-            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} Tab next \u{00b7} q quit"
+            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} q quit"
         }
         Pane::Compose => "Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
     };

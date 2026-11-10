@@ -64,6 +64,12 @@ pub struct App {
     pub last_error: Option<FrameError>,
     /// One-shot notice (commit receipt / resource answer / write failure).
     pub flash: Option<String>,
+    /// The core was handed a relay at spawn (its visit ran at
+    /// startup; surviving spawn = the connect succeeded).
+    pub relayed: bool,
+    /// The core's stderr ring, viewable on demand (the diagnosis
+    /// window — never rendered into the main surface).
+    pub show_log: bool,
     pub core_alive: bool,
     /// Exit status once the core was reaped (kept for the exit code).
     pub core_exit: Option<std::process::ExitStatus>,
@@ -120,6 +126,8 @@ impl App {
             acked: Vec::new(),
             last_error: None,
             flash: None,
+            relayed: false,
+            show_log: false,
             core_alive: true,
             core_exit: None,
             core_stderr: VecDeque::new(),
@@ -129,11 +137,15 @@ impl App {
     }
 
     /// The attach-time requests: the thread list, the peer set, and
-    /// the core's own identity card.
-    pub fn session_open(&mut self) {
+    /// — RELAYED CORES ONLY — the core's own identity card (a
+    /// stdio-only core has no mail identity; asking would only earn
+    /// an error).
+    pub fn session_open(&mut self, relayed: bool) {
         self.refresh_threads();
         self.refresh_peers();
-        self.refresh_self();
+        if relayed {
+            self.refresh_self();
+        }
     }
 
     pub fn refresh_threads(&mut self) {
@@ -281,7 +293,11 @@ impl App {
             .position(|(d, _)| d == digest)
             .unwrap_or(0) as u64
             + 1;
-        Some(self.acked.iter().all(|a| a.up_to.saturating_sub(a.base) >= seq))
+        Some(
+            self.acked
+                .iter()
+                .all(|a| a.up_to.saturating_sub(a.base) >= seq),
+        )
     }
 
     /// How far the receipt frontiers reach into this session's mailed
@@ -408,6 +424,9 @@ impl App {
                 self.focus = Pane::Compose;
                 self.flash = Some("new thread".into());
             }
+            // The core's stderr ring — the diagnosis window (a talky
+            // core: --core "zconned -v").
+            KeyCode::Char('l') => self.show_log = !self.show_log,
             // The peers popup: the set + the core's own card, one
             // refresh per open (cheap, and the set is small).
             KeyCode::Char('p') => {
@@ -535,6 +554,13 @@ impl App {
                 }
             }
             Some(Out::Error(e)) => {
+                // The known all-default decode: the core received a
+                // verb it does not know — a stale core build.
+                let mut e = e;
+                if e.code == "internal" && e.message == "no op in frame" {
+                    e.message = "stale core build — rebuild it: cargo build -p zconned --bin zconned"
+                        .into();
+                }
                 self.last_error = Some(e);
                 self.flash = None;
             }

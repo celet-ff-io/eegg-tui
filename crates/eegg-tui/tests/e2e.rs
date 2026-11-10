@@ -19,7 +19,7 @@ use zconned_stdio_types::{
     IncomingFrame, OutgoingFrame, incoming_frame::Method, outgoing_frame::Frame as Out,
 };
 
-use eegg_tui::core::{Process, CoreStdout};
+use eegg_tui::core::{CoreStdout, Process};
 
 /// Build the real binaries from the linked zconn tree and return
 /// their paths. `None` = no linked tree (skip).
@@ -65,9 +65,12 @@ impl Client {
         // holds the identity, and two cores sharing it claim the SAME
         // mailbox — the relay's one-session-per-anchor rule kills one
         // of them and every send defers.
-        let cmdline = format!("{} --store {}", zconned.to_string_lossy(), store.to_string_lossy());
-        let (mut core, stdout, stderr) =
-            Process::spawn(&cmdline, Some(relay)).expect("core spawn");
+        let cmdline = format!(
+            "{} --store {}",
+            zconned.to_string_lossy(),
+            store.to_string_lossy()
+        );
+        let (mut core, stdout, stderr) = Process::spawn(&cmdline, Some(relay)).expect("core spawn");
         // The relayed core writes operational logs to stderr; park
         // them on the test's stderr for diagnosis.
         let mut stderr = stderr;
@@ -91,12 +94,17 @@ impl Client {
                 }
             }
         });
-        Self { _core: core, frames: rx }
+        Self {
+            _core: core,
+            frames: rx,
+        }
     }
 
     fn send(&mut self, method: Method) {
         self._core
-            .write_frame(&IncomingFrame { method: Some(method) })
+            .write_frame(&IncomingFrame {
+                method: Some(method),
+            })
             .expect("core stdin write");
     }
 
@@ -185,14 +193,18 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     a.wait_for("cursor push (a)", Duration::from_secs(10), |f| {
         matches!(f, Out::MsgCursorPush(_))
     });
-    a.send(Method::MsgDraftContentSet(zconned_stdio_types::MsgDraftContentSet {
-        kind: "text/plain".into(),
-        data: b"e2e: over the blind relay".to_vec(),
-    }));
+    a.send(Method::MsgDraftContentSet(
+        zconned_stdio_types::MsgDraftContentSet {
+            kind: "text/plain".into(),
+            data: b"e2e: over the blind relay".to_vec(),
+        },
+    ));
     a.wait_for("draft push (a)", Duration::from_secs(10), |f| {
         matches!(f, Out::MsgDraftPush(_))
     });
-    a.send(Method::MsgDraftCommit(zconned_stdio_types::MsgDraftCommit {}));
+    a.send(Method::MsgDraftCommit(
+        zconned_stdio_types::MsgDraftCommit {},
+    ));
     a.wait_for("commit receipt (a)", Duration::from_secs(10), |f| {
         matches!(f, Out::MsgAdded(_))
     });
@@ -207,9 +219,11 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     // read). Zero-frontier statements exist (the counterpart's
     // position pairing writes a 0 ack at connect) — wait for the one
     // that covers the commit.
-    let ack = a.wait_for("the receipt on a", Duration::from_secs(30), |f| {
-        matches!(f, Out::MailAcked(m) if m.up_to >= 1)
-    });
+    let ack = a.wait_for(
+        "the receipt on a",
+        Duration::from_secs(30),
+        |f| matches!(f, Out::MailAcked(m) if m.up_to >= 1),
+    );
     match ack {
         Out::MailAcked(m) => {
             assert_eq!(m.to_mailbox.len(), 32, "the anchor is 32 bytes");

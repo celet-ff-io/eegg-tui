@@ -1,12 +1,12 @@
-//! eegg — the zconn terminal interface (LPZ107): the client mechanism,
-//! the C2 event model, and the ratatui surface.
+//! eegg — the zconn terminal interface: the client mechanism, the
+//! single-channel event model, and the ratatui surface.
 //!
 //! Spawn the core (`zconned`) as its own dedicated child process over
-//! stdio protobuf (the nvim/LSP-client pattern); runtime topology is
-//! strictly 1:1; client EOF is the only legal shutdown.
+//! stdio protobuf (the nvim/LSP-client pattern); one interface owns
+//! exactly one core; client EOF is the only legal shutdown.
 //!
-//! M0 milestone: UI-complete shell — real i2c client mechanism against
-//! fake cores (S2), features attach when LPZ106 completes.
+//! This milestone: a UI-complete shell — the real client mechanism
+//! against fake cores; features attach when LPZ106 completes.
 
 pub mod app;
 pub mod cli;
@@ -28,8 +28,10 @@ use crate::core::Core;
 pub fn run(cli: &Cli) -> miette::Result<()> {
     // The black-box log: everything goes to the FILE, nothing to the
     // tty the UI owns — stderr carries only the post-restore death
-    // report. Env failure is loud (M0 refuses un-diagnosable sessions).
-    let log_file = paths::resolve_log_file(cli.log_file.as_deref())?;
+    // report. Env failure is loud (the interface refuses un-diagnosable sessions).
+    let log_file = paths::resolve_log_file(cli.log_file.as_deref())
+        .into_diagnostic()
+        .context("resolving the log file")?;
     let log_sink = std::fs::File::options()
         .create(true)
         .append(true)
@@ -56,7 +58,7 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
         .wrap_err("handshake with core")?;
 
     // A panic restores the terminal before the handler prints; the OS
-    // closes our fds, so the core sees EOF and exits (1:1 axiom).
+    // closes our fds, so the core sees EOF and exits.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         ui::restore_terminal();
@@ -76,8 +78,8 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
     app.refresh_threads(); // the first hand-typed request
     run_loop(&mut core, &mut app, &rx, &mut term)?;
 
-    // Teardown order (binding): restore terminal → drop stdin →
-    // reader join → wait().
+    // Teardown order: restore terminal → drop stdin → reader join →
+    // wait().
     ui::restore_terminal();
     let exit = core
         .take()
@@ -87,8 +89,8 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
         let _ = t.join();
     }
 
-    // Death report, after the screen is back (the translator's exit
-    // discipline: a bad core status is an ERROR, not a forwarded code).
+    // Death report, after the screen is back: a bad core status is an
+    // error, not a forwarded exit code.
     for line in &app.core_stderr {
         eprintln!("core stderr: {line}");
     }

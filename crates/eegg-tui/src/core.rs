@@ -49,6 +49,7 @@ pub enum Error {
 }
 
 /// The child process plus the one writable pipe (core stdin).
+#[derive(Debug)]
 pub struct Core {
     child: Child,
     stdin: ChildStdin,
@@ -56,6 +57,7 @@ pub struct Core {
 
 /// The readable pipe (core stdout) with its framing state. Owned by
 /// the reader thread.
+#[derive(Debug)]
 pub struct CoreStdout {
     stream: ChildStdout,
     buf: BytesMut,
@@ -156,6 +158,7 @@ impl CoreStdout {
 
 /// The core's stderr pipe — never rendered into the full-screen UI;
 /// buffered and surfaced only on the death report.
+#[derive(Debug)]
 pub struct ChildStderrStream(std::process::ChildStderr);
 
 impl Read for ChildStderrStream {

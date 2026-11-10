@@ -25,6 +25,7 @@ pub enum Pane {
     Compose,
 }
 
+#[derive(Debug)]
 pub struct App {
     pub focus: Pane,
     pub threads: Vec<MsgRef>,
@@ -213,8 +214,8 @@ impl App {
         }
     }
 
-    /// Frames arrive ANYTIME; each updates the view (B20: render what
-    /// core reports).
+    /// Frames arrive ANYTIME; each updates the view — the interface
+    /// renders what the core reports.
     fn on_frame(&mut self, f: zconned_stdio_types::OutgoingFrame) {
         match f.frame {
             Some(Out::MsgAdded(a)) => {
@@ -258,6 +259,9 @@ impl App {
                     (None, _) => "resource: no ref".into(),
                 });
             }
+            // The peer domain is not on this milestone's surface; the
+            // interface never asks for it, so a push cannot arrive.
+            Some(Out::PeersPush(_)) => {}
             Some(Out::Error(e)) => {
                 self.last_error = Some(e);
                 self.flash = None;

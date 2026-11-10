@@ -1,5 +1,5 @@
-//! C2 event plumbing: producer threads feed one channel; the main
-//! loop is the sole consumer (and the sole core-stdin writer).
+//! Event plumbing: producer threads feed one channel; the main loop
+//! is the sole consumer (and the sole core-stdin writer).
 
 use std::thread::JoinHandle;
 
@@ -41,7 +41,7 @@ pub fn spawn_input(tx: Sender<Evt>) -> JoinHandle<()> {
                             break;
                         }
                     }
-                    Ok(_) => {}      // mouse / focus / paste — M0 ignores
+                    Ok(_) => {}      // mouse / focus / paste — ignored for now
                     Err(_) => break, // terminal gone — nothing left to read
                 }
             }

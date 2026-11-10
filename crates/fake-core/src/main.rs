@@ -1,8 +1,8 @@
 //! fake-core — a minimal stand-in for the `zconned` core process, built
-//! to drive the eegg shell (LPZ107 M0). The real wire contract
-//! (handshake v2, framed protobuf, the day-one verb set), a toy
-//! in-memory state behind it. NOT the core: core logic lives in
-//! LPZ106 (B18) — this exists so the interface can run without it.
+//! to drive the eegg shell. The real wire contract (handshake v2,
+//! framed protobuf, the day-one verb set), a toy in-memory state
+//! behind it. NOT the core: core logic lives in LPZ106 — this exists
+//! so the interface can run without it.
 
 use std::{
     collections::HashMap,
@@ -43,11 +43,11 @@ struct Args {
     verbose: Verbosity<WarnLevel>,
 }
 
-type Result<T> = core::result::Result<T, Framing>;
+type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-enum Framing {
+enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to deframe frame: {0}")]
@@ -59,7 +59,7 @@ enum Framing {
 }
 
 /// Sync framed reader over a std stream (the deframer state machine,
-/// the sync core underneath 106's async io-link adapter).
+/// the sync core underneath the async io-link adapter).
 struct Reader {
     stream: Box<dyn std::io::Read>,
     buf: BytesMut,
@@ -86,7 +86,7 @@ impl Reader {
                 return if self.deframer.is_idle() {
                     Ok(None)
                 } else {
-                    Err(Framing::TruncatedFrame)
+                    Err(Error::TruncatedFrame)
                 };
             }
             self.buf.extend_from_slice(&chunk[..n]);
@@ -99,13 +99,16 @@ fn write_frame<T: Message>(mut stream: impl std::io::Write, frame: &T) -> Result
     stream.flush().map_err(Into::into)
 }
 
+#[derive(Debug)]
 struct Thread {
     id: MsgRef,
     log: Vec<zconned_stdio_types::Entry>,
 }
 
+#[derive(Debug)]
 struct FakeCore {
     threads: Vec<Thread>,
+    peers: Vec<zconned_stdio_types::Peer>,
     cursor: Vec<MsgRef>,
     content: Option<Value>,
     claims: Vec<Value>,
@@ -117,6 +120,7 @@ impl FakeCore {
     fn new() -> Self {
         Self {
             threads: Vec::new(),
+            peers: Vec::new(),
             cursor: Vec::new(),
             content: None,
             claims: Vec::new(),
@@ -290,6 +294,19 @@ impl FakeCore {
                     })),
                 }]
             }
+            // The fake stores peer records as-is: signature
+            // verification is core logic, and the toy keeps none.
+            Method::PeerSet(s) => {
+                if let Some(peer) = s.peer {
+                    self.peers.push(peer);
+                }
+                Vec::new()
+            }
+            Method::PeersGet(_) => vec![OutgoingFrame {
+                frame: Some(Out::PeersPush(zconned_stdio_types::PeersPush {
+                    peers: self.peers.clone(),
+                })),
+            }],
         }
     }
 
@@ -372,7 +389,7 @@ impl FakeCore {
 fn serve(mut reader: Reader, mut stdout: impl std::io::Write) -> Result<()> {
     let Handshake { version: theirs } = reader
         .read_frame::<Handshake>()?
-        .ok_or(Framing::TruncatedFrame)?; // eof before handshake
+        .ok_or(Error::TruncatedFrame)?; // eof before handshake
     if theirs != PROTOCOL_VERSION {
         eprintln!(
             "handshake version mismatch: core speaks {PROTOCOL_VERSION}, client spoke {theirs}"

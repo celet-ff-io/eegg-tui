@@ -16,7 +16,8 @@ static STYLES: Styles = Styles::styled()
     .placeholder(AnsiColor::Red.on_default());
 
 /// eegg - the zconn terminal interface. Spawns a core process over
-/// stdio protobuf (strictly 1:1); quitting tears the core down.
+/// stdio protobuf (one interface owns exactly one core); quitting
+/// tears the core down.
 #[derive(Debug, Parser)]
 #[command(version)]
 #[command(styles = STYLES.clone())]

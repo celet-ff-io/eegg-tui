@@ -117,7 +117,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 32] = [
+    let rows: [(bool, &str, &str); 37] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -152,8 +152,17 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "Tab",
             "next pane (threads \u{2192} transcript \u{2192} compose)",
         ),
-        (true, "l", "core log popup (the core's stderr ring)"),
+        (true, "h", "the threads pane (left)"),
+        (true, "l", "the transcript pane (right)"),
+        (true, "L", "core log popup (the core's stderr ring)"),
         (true, "q", "quit"),
+        (false, "log", ""),
+        (
+            true,
+            "j / k \u{2191}\u{2193}",
+            "scroll the core's stderr ring",
+        ),
+        (true, "Esc / L / q", "close the popup"),
     ];
     let lines: Vec<Line> = rows
         .iter()
@@ -208,11 +217,18 @@ fn render_log_popup(app: &App, f: &mut Frame) {
         .iter()
         .map(|l| Line::from(Span::from(l.trim_end().to_owned())).dark_gray())
         .collect();
+    // The scroll offset clamps at render time: a popup shorter than
+    // the ring shows a window over it.
+    let inner = area.height.saturating_sub(2) as usize;
+    let offset = app
+        .log_scroll
+        .min(lines.len().saturating_sub(inner.min(lines.len())));
     Paragraph::new(lines)
+        .scroll((offset as u16, 0))
         .block(
             Block::bordered()
                 .title(format!(
-                    " core stderr (last {}) — l closes ",
+                    " core stderr (last {}) — Esc/L closes, j/k scrolls ",
                     app.core_stderr.len()
                 ))
                 .border_style(Color::Yellow),
@@ -549,10 +565,10 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match app.focus {
         Pane::Threads => {
-            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p peers \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Transcript => {
-            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} h left \u{00b7} p peers \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Compose => {
             "Enter send \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc clear \u{00b7} Tab next"

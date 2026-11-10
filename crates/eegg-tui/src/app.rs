@@ -115,6 +115,8 @@ pub struct App {
     /// The core's stderr ring, viewable on demand (the diagnosis
     /// window — never rendered into the main surface).
     pub show_log: bool,
+    /// The log popup's scroll offset (clamped at render time).
+    pub log_scroll: usize,
     pub core_alive: bool,
     /// Exit status once the core was reaped (kept for the exit code).
     pub core_exit: Option<std::process::ExitStatus>,
@@ -179,6 +181,7 @@ impl App {
             flash: None,
             relayed: false,
             show_log: false,
+            log_scroll: 0,
             core_alive: true,
             core_exit: None,
             core_stderr: VecDeque::new(),
@@ -697,6 +700,26 @@ impl App {
             return;
         }
 
+        // The log popup eats every key: the panes underneath stay
+        // untouched (a stray q must quit from the main surface,
+        // never from inside the popup).
+        if self.show_log {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => {
+                    self.show_log = false;
+                    self.log_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.log_scroll = self.log_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.log_scroll = self.log_scroll.saturating_add(1);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.focus == Pane::Compose {
             use ratatui::crossterm::event::KeyModifiers;
             match key.code {
@@ -751,6 +774,11 @@ impl App {
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab => self.cycle_focus(),
+            // The horizontal pane navigation (lazygit-style): h = the
+            // left panel, l = the right one. The compose pane stays
+            // Tab-only — h/j/k/l type literal text while composing.
+            KeyCode::Char('h') => self.focus = Pane::Threads,
+            KeyCode::Char('l') => self.focus = Pane::Transcript,
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
             KeyCode::Home | KeyCode::Char('g') => match self.focus {
@@ -789,7 +817,10 @@ impl App {
             }
             // The core's stderr ring — the diagnosis window (a talky
             // core: --core "zconned -v").
-            KeyCode::Char('l') => self.show_log = !self.show_log,
+            KeyCode::Char('L') => {
+                self.show_log = !self.show_log;
+                self.log_scroll = 0;
+            }
             // The peers popup: the set + the core's own card, one
             // refresh per open (cheap, and the set is small).
             KeyCode::Char('p') => {

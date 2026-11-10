@@ -139,8 +139,8 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "Esc", "clear the compose text"),
         (false, "peers", ""),
         (true, "p", "open the peers popup"),
-        (true, "c", "copy my card to the clipboard"),
-        (true, "s", "save my card to a file"),
+        (true, "c", "copy the selected card (me or a peer)"),
+        (true, "s", "save the selected card to a file"),
         (true, "a", "add the counterpart's card"),
         (true, "Ctrl-V", "paste the card from the clipboard"),
         (true, "Ctrl-R", "load the card from a file"),
@@ -239,6 +239,20 @@ fn render_log_popup(app: &App, f: &mut Frame) {
 
 /// The peers popup: the core's own card on top (copy source), the
 /// send-target set in the middle, the card/file box at the bottom.
+/// One peers-list row: the fingerprint, the algorithm pair, the
+/// endpoints; `tag` marks the self row.
+fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
+    let mut line = vec![
+        Span::from(tag.to_owned()).yellow(),
+        Span::from(short_hex(&p.sign_pub)).cyan(),
+        Span::from(format!(" {} + {}", p.sign_algo, p.dh_algo)).dark_gray(),
+    ];
+    if !p.endpoints.is_empty() {
+        line.push(Span::from(format!("  {}", p.endpoints.join(" "))));
+    }
+    ListItem::from(Line::from(line))
+}
+
 fn render_peers_popup(app: &mut App, f: &mut Frame) {
     let area = centered(f.area(), 70, 60);
     f.render_widget(Clear, area);
@@ -255,7 +269,8 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
 
     // The card box shows TWO text lines: a longer card is clipped
     // with an explicit ellipsis — the full text travels through c
-    // (clipboard) / s (file), never through the screen.
+    // (clipboard) / s (file) on the SELECTED row, never through the
+    // screen.
     let card_text = app.self_card.clone().unwrap_or_else(|| "(no card)".into());
     let capacity = card.width.saturating_sub(2) as usize * 2;
     let shown = if card_text.chars().count() > capacity {
@@ -266,23 +281,23 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
     };
     Paragraph::new(Line::from(Span::from(shown).cyan()))
         .wrap(ratatui::widgets::Wrap { trim: false })
-        .block(Block::bordered().title(" my card — c copy · s save to file "))
+        .block(Block::bordered().title(" my card — j/k selects (me) or a peer · c copy · s save "))
         .render(card, f.buffer_mut());
 
-    let items: Vec<ListItem> = app
-        .peers
-        .iter()
-        .map(|p| {
-            let mut line = vec![
-                Span::from(short_hex(&p.sign_pub)).cyan(),
-                Span::from(format!(" {} + {}", p.sign_algo, p.dh_algo)).dark_gray(),
-            ];
-            if !p.endpoints.is_empty() {
-                line.push(Span::from(format!("  {}", p.endpoints.join(" "))));
-            }
-            ListItem::from(Line::from(line))
-        })
-        .collect();
+    // The selection spans me + the peer set: row 0 = me (decoded
+    // from my card text for the same record display).
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.peers.len() + 1);
+    items.push(
+        match app
+            .self_card
+            .as_deref()
+            .and_then(crate::app::peer_from_card)
+        {
+            Some(me) => peer_item(&me, "(me) "),
+            None => ListItem::from(Line::from(Span::from("(me) (no card)").dark_gray())),
+        },
+    );
+    items.extend(app.peers.iter().map(|p| peer_item(p, "    ")));
     let list_w = List::new(items)
         .block(
             Block::bordered()

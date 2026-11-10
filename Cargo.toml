@@ -42,6 +42,7 @@ zconned-material = { path = "local-deps/zconn/crates/zconned-material" }
 
 # --- wire + link glue ---
 prost = "0.14.4"
+base64 = "0.22.1"
 pbjson-types = "0.9.0"
 prost-types = "0.14.4"
 bytes = "1.12.1"

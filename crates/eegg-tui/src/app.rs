@@ -90,6 +90,10 @@ pub struct App {
     pub file_input: Input,
     /// The active MAIN-window file-path box.
     pub file_box: FileBox,
+    /// The card staged for the save-to-file flow: the SELECTED entry
+    /// in the peers popup (my card or a peer's), resolved at `s`
+    /// time — a set refresh between `s` and Enter never repoints it.
+    pub save_card: Option<String>,
     /// This session's sent rows: (content digest, was mailed) — a
     /// commit mails only when the target set is non-empty. The ordinal
     /// in this vector = the row's chain seq within the session.
@@ -128,6 +132,26 @@ pub struct App {
 }
 
 const STDERR_TAIL: usize = 40;
+
+/// The card text: the canonical single-line base64 of a peer record
+/// (the very form the core decodes a pasted card from; the inverse
+/// codec, not core logic — the core stays the identity's truth).
+pub(crate) fn card_text(peer: &Peer) -> String {
+    use base64::Engine as _;
+    use prost::Message as _;
+    base64::engine::general_purpose::STANDARD.encode(peer.encode_to_vec())
+}
+
+/// The inverse: a card text decodes back to the record (DISPLAY
+/// only — identity questions always go to the core).
+pub(crate) fn peer_from_card(card: &str) -> Option<Peer> {
+    use base64::Engine as _;
+    use prost::Message as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(card.trim())
+        .ok()?;
+    Peer::decode(bytes.as_slice()).ok()
+}
 
 /// One counterpart's receipt frontier, as the core stated it.
 /// `base` anchors the chain seq to THIS session: the first statement
@@ -172,6 +196,7 @@ impl App {
             card_flow: CardFlow::None,
             file_input: Input::default(),
             file_box: FileBox::None,
+            save_card: None,
             sent: Vec::new(),
             pending_text: None,
             ts_stamped_at: None,
@@ -292,6 +317,17 @@ impl App {
     fn selected_entry(&self) -> Option<&zconned_stdio_types::Entry> {
         let i = self.transcript_sel.selected()?;
         self.entries.get(i)
+    }
+
+    /// The selected entry's card text in the peers popup: row 0 =
+    /// my card (verbatim from the core), the rest = the peer set,
+    /// re-encoded canonically (the card text IS the record's
+    /// canonical single-line base64).
+    fn selected_card(&self) -> Option<String> {
+        match self.peers_sel.selected() {
+            Some(i) if i > 0 => self.peers.get(i - 1).map(card_text),
+            _ => self.self_card.clone(),
+        }
     }
 
     /// The row's TEXT: the content value decoded as UTF-8. `None` =
@@ -591,7 +627,7 @@ impl App {
                 }
             }
             (CardFlow::SaveCard, KeyCode::Enter) => {
-                let Some(card) = self.self_card.clone() else {
+                let Some(card) = self.save_card.clone() else {
                     self.flash = Some("no card to save".into());
                     return true;
                 };
@@ -601,6 +637,7 @@ impl App {
                         Ok(()) => {
                             self.flash = Some(format!("card saved to {}", p.display()));
                             self.file_input.reset();
+                            self.save_card = None;
                             self.card_flow = CardFlow::None;
                         }
                         Err(e) => self.flash = Some(format!("save failed: {e}")),
@@ -610,6 +647,7 @@ impl App {
             }
             (CardFlow::ReadCard | CardFlow::SaveCard, KeyCode::Esc) => {
                 self.file_input.reset();
+                self.save_card = None;
                 self.card_flow = CardFlow::None;
             }
             (CardFlow::ReadCard | CardFlow::SaveCard, _) => {
@@ -620,35 +658,37 @@ impl App {
                 self.peer_input.reset();
                 self.card_flow = CardFlow::InputCard;
             }
-            // Copy the core's own card to the clipboard (may be
-            // unavailable — the file channel is the fallback).
+            // Copy the SELECTED card to the clipboard (my card or a
+            // peer's — the selection spans both; the clipboard may
+            // be unavailable — the file channel is the fallback).
             (CardFlow::None, KeyCode::Char('c')) => {
-                self.flash = Some(match self.self_card.as_deref() {
-                    Some(card) => clipboard::set(card)
+                self.flash = Some(match self.selected_card() {
+                    Some(card) => clipboard::set(&card)
                         .map(|()| "card copied to clipboard".to_owned())
                         .unwrap_or_else(|reason| format!("{reason} — use s to save a file")),
                     None => "no card to copy".into(),
                 });
             }
-            // Save the core's own card to a file.
-            (CardFlow::None, KeyCode::Char('s')) => {
-                if self.self_card.is_some() {
+            // Save the SELECTED card to a file (resolved NOW — a
+            // set refresh before Enter never repoints it).
+            (CardFlow::None, KeyCode::Char('s')) => match self.selected_card() {
+                Some(card) => {
                     self.file_input.reset();
+                    self.save_card = Some(card);
                     self.card_flow = CardFlow::SaveCard;
-                } else {
-                    self.flash = Some("no card to save".into());
                 }
-            }
+                None => self.flash = Some("no card to save".into()),
+            },
+            // The selection spans (me) + the peer set; row 0 = me
+            // always exists, even with an empty set.
             (CardFlow::None, KeyCode::Up | KeyCode::Char('k')) => {
-                let n = self.peers.len();
                 let i = self.peers_sel.selected().unwrap_or(0);
-                self.peers_sel
-                    .select((n > 0).then_some(i.saturating_sub(1)));
+                self.peers_sel.select(Some(i.saturating_sub(1)));
             }
             (CardFlow::None, KeyCode::Down | KeyCode::Char('j')) => {
                 let n = self.peers.len();
                 let i = self.peers_sel.selected().unwrap_or(0);
-                self.peers_sel.select((n > 0).then_some((i + 1).min(n - 1)));
+                self.peers_sel.select(Some((i + 1).min(n)));
             }
             (CardFlow::None, KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q')) => {
                 self.show_peers = false;
@@ -826,7 +866,7 @@ impl App {
             KeyCode::Char('p') => {
                 self.show_peers = true;
                 self.card_flow = CardFlow::None;
-                self.peers_sel.select((!self.peers.is_empty()).then_some(0));
+                self.peers_sel.select(Some(0));
                 self.refresh_peers();
                 self.refresh_self();
             }

@@ -706,6 +706,7 @@ name = "eegg-tui"
 version = "0.1.0-alpha"
 dependencies = [
  "arboard",
+ "base64",
  "bytes",
  "clap",
  "clap-verbosity-flag",

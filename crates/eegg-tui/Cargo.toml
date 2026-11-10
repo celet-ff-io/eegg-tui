@@ -18,6 +18,7 @@ zconned-stdio-types.workspace = true
 zconned-material.workspace = true
 ratatui.workspace = true
 prost.workspace = true
+base64.workspace = true
 pbjson-types.workspace = true
 prost-types.workspace = true
 bytes.workspace = true

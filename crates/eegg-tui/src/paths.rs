@@ -49,9 +49,7 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
 /// The black-box log file: `--log-file` override, else
 /// `state_dir()/eegg.log`. Env failure is LOUD — the interface
 /// refuses to start un-diagnosable sessions.
-pub fn resolve_log_file(
-    override_path: Option<&std::path::Path>,
-) -> Result<std::path::PathBuf> {
+pub fn resolve_log_file(override_path: Option<&std::path::Path>) -> Result<std::path::PathBuf> {
     if let Some(p) = override_path {
         return Ok(p.to_owned());
     }

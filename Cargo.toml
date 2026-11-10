@@ -9,11 +9,11 @@ resolver = "3"
 [workspace.package]
 authors = ["celet-ff-io"]
 edition = "2024"
-# License intentionally left EMPTY for now (principal, 2026-11-09):
-# the single value lives HERE; member crates reference it via
-# `license.workspace = true`. Fill this in once the licensing
-# decision lands — never set a license on members directly.
-license = ""
+# The single license value lives HERE (principal, 2026-11-10: mimic
+# zconn verbatim — MIT OR Apache-2.0 with both LICENSE files);
+# member crates reference it via `license.workspace = true` — never
+# set a license on members directly.
+license = "MIT OR Apache-2.0"
 publish = false
 rust-version = "1.98"
 

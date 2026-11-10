@@ -125,11 +125,7 @@ exceptions = [
 # published to private registries.
 # To see how to mark a crate as unpublished (to the official registry),
 # visit https://doc.rust-lang.org/cargo/reference/manifest.html#the-publish-field.
-# TRUE for eegg: the workspace license value is deliberately EMPTY
-# pending the principal's licensing decision; the members are
-# publish=false, so skipping them here is honest. Flip to false once
-# the license value lands.
-ignore = true
+ignore = false
 # One or more private registries that you might publish crates to, if a crate
 # is only published to private registries, and ignore is true, the crate will
 # not have its license(s) checked
@@ -202,7 +198,20 @@ deny = [
 
 # Certain crates/versions that will be skipped when doing duplicate detection.
 skip = [
-  "unicode-width@0.1.14", # miette 7 pins the older line (ratatui 0.30 uses 0.2); lifts with a miette release
+  # All of these flow in through the zconned-* PATH deps — the fixes
+  # live in the LPZ106 tree (read-only for this repo); each skip lifts
+  # when 106's stack moves.
+  { crate = "block-buffer@0.10.4", reason = "the RustCrypto 0.10-era stack (aead 0.5 / sha3 0.10 via zconned-crypto); lifts when its digest-0.11 generation ships" },
+  { crate = "crypto-common@0.1.7", reason = "the RustCrypto 0.10-era stack (aead 0.5); lifts with the same 106 move" },
+  { crate = "digest@0.10.7", reason = "the RustCrypto 0.10-era stack (sha3 0.10 / aead 0.5); lifts with the same 106 move" },
+  { crate = "generic-array@0.14.7", reason = "the RustCrypto 0.10-era stack (aead 0.5); lifts with the same 106 move" },
+  { crate = "cpufeatures@0.2.17", reason = "the RustCrypto 0.10-era stack (chacha20 0.9 / sha3 0.10); lifts with the same 106 move" },
+  { crate = "rand_core@0.6.4", reason = "the RustCrypto 0.10-era stack (crypto-common 0.1); lifts with the same 106 move" },
+  { crate = "getrandom@0.2.17", reason = "rand_core 0.6 pins the older getrandom line (the RustCrypto 0.10-era stack)" },
+  { crate = "syn@2.0.119", reason = "curve25519-dalek-derive pins the older syn (derive_more/crossterm uses syn 3); lifts with a dalek release" },
+  { crate = "hashbrown@0.15.5", reason = "petgraph (prost-build) pins the older line; lifts with a petgraph release" },
+  { crate = "foldhash@0.1.5", reason = "hashbrown 0.15 pins the older foldhash (petgraph via prost-build); lifts with a petgraph release" },
+  { crate = "unicode-width@0.1.14", reason = "miette 7 pins the older line (ratatui 0.30 uses 0.2); lifts with a miette release" },
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive

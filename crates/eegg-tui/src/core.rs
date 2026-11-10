@@ -70,7 +70,10 @@ impl Process {
     /// pass-through form (the relay address otherwise lives in the
     /// core's own configuration, never here). stderr is piped too —
     /// the full-screen UI must never share the screen with core logs.
-    pub fn spawn(cmdline: &str, relay: Option<&str>) -> Result<(Process, ChildStdout, ChildStderrStream)> {
+    pub fn spawn(
+        cmdline: &str,
+        relay: Option<&str>,
+    ) -> Result<(Process, ChildStdout, ChildStderrStream)> {
         let mut parts = shlex::split(cmdline)
             .filter(|p| !p.is_empty())
             .ok_or_else(|| Error::Spawn {

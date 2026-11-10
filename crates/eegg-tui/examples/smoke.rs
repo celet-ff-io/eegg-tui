@@ -17,7 +17,7 @@ use zconned_stdio_types::{
     outgoing_frame::Frame as Out,
 };
 
-use eegg_tui::core::{Process, CoreStdout};
+use eegg_tui::core::{CoreStdout, Process};
 
 fn main() -> miette::Result<()> {
     phase_flow(&std::env::var("EEGG_SMOKE_CORE").unwrap_or_else(|_| "fake-core".into()))?;

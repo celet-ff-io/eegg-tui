@@ -52,6 +52,15 @@ pub struct App {
     pub peers_sel: ListState,
     pub peer_input: Input,
     pub peer_input_active: bool,
+    /// This session's sent rows: (content digest, was mailed) — a
+    /// commit mails only when the target set is non-empty. The ordinal
+    /// in this vector = the row's chain seq within the session.
+    pub sent: Vec<(Vec<u8>, bool)>,
+    /// Set between a commit request and its receipt (the next
+    /// msg_added); the receipt is told from an arrival by this flag.
+    pub awaiting_commit: bool,
+    /// The per-counterpart receipt frontiers (the mail_acked stream).
+    pub acked: Vec<Acked>,
     pub last_error: Option<FrameError>,
     /// One-shot notice (commit receipt / resource answer / write failure).
     pub flash: Option<String>,
@@ -66,6 +75,20 @@ pub struct App {
 }
 
 const STDERR_TAIL: usize = 40;
+
+/// One counterpart's receipt frontier, as the core stated it.
+/// `base` anchors the chain seq to THIS session: the first statement
+/// for an anchor minus the commits already made at that moment (the
+/// attach statements land before any request reply; a first live
+/// statement on a fresh chain compensates to 0). `up_to` is the
+/// running max (statements are unmerged and monotone per anchor).
+/// One counterpart's receipt frontier, as the core stated it.
+#[derive(Debug)]
+pub struct Acked {
+    anchor: Vec<u8>,
+    base: u64,
+    up_to: u64,
+}
 
 impl Default for App {
     fn default() -> Self {
@@ -92,6 +115,9 @@ impl App {
             peers_sel: ListState::default(),
             peer_input: Input::default(),
             peer_input_active: false,
+            sent: Vec::new(),
+            awaiting_commit: false,
+            acked: Vec::new(),
             last_error: None,
             flash: None,
             core_alive: true,
@@ -232,10 +258,44 @@ impl App {
                 data: text.into_bytes(),
             })),
         });
+        self.awaiting_commit = true;
         self.outbox.push(IncomingFrame {
             method: Some(Method::MsgDraftCommit(MsgDraftCommit {})),
         });
         self.input.reset();
+    }
+
+    /// Whether the row with this digest is confirmed received: it was
+    /// mailed, the target set is non-empty, and EVERY stated frontier
+    /// covers the row's MAILED ordinal (a commit mails one mail to
+    /// every set member; a chain seq counts mailed commits only).
+    pub fn row_received(&self, digest: &[u8]) -> Option<bool> {
+        let (_, mailed) = self.sent.iter().find(|(d, _)| d == digest)?;
+        if !mailed || self.acked.is_empty() {
+            return Some(false);
+        }
+        let seq = self
+            .sent
+            .iter()
+            .filter(|(_, m)| *m)
+            .position(|(d, _)| d == digest)
+            .unwrap_or(0) as u64
+            + 1;
+        Some(self.acked.iter().all(|a| a.up_to.saturating_sub(a.base) >= seq))
+    }
+
+    /// How far the receipt frontiers reach into this session's mailed
+    /// rows (for the status line): (covered, mailed).
+    pub fn delivered(&self) -> (u64, usize) {
+        let mailed = self.sent.iter().filter(|(_, m)| *m).count();
+        let covered = self
+            .acked
+            .iter()
+            .map(|a| a.up_to.saturating_sub(a.base))
+            .min()
+            .unwrap_or(0)
+            .min(mailed as u64);
+        (covered, mailed)
     }
 
     /// Keys while the peers popup is up; `false` = the popup closed
@@ -277,8 +337,7 @@ impl App {
             (false, KeyCode::Down | KeyCode::Char('j')) => {
                 let n = self.peers.len();
                 let i = self.peers_sel.selected().unwrap_or(0);
-                self.peers_sel
-                    .select((n > 0).then_some((i + 1).min(n - 1)));
+                self.peers_sel.select((n > 0).then_some((i + 1).min(n - 1)));
             }
             (false, KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q')) => {
                 self.show_peers = false;
@@ -354,8 +413,7 @@ impl App {
             KeyCode::Char('p') => {
                 self.show_peers = true;
                 self.peer_input_active = false;
-                self.peers_sel
-                    .select((!self.peers.is_empty()).then_some(0));
+                self.peers_sel.select((!self.peers.is_empty()).then_some(0));
                 self.refresh_peers();
                 self.refresh_self();
             }
@@ -371,12 +429,21 @@ impl App {
             Some(Out::MsgAdded(a)) => {
                 if let Some(e) = a.entry {
                     // Commit receipts and network arrivals share this
-                    // one statement; dedup by digest guards against a
-                    // re-announced row (a refetch, a replay). Routing:
-                    // a row continuing the OPEN thread (its prev
-                    // addresses the transcript's tip) appends live;
-                    // anything else only refreshes the thread list.
+                    // one statement; the awaiting flag tells them apart
+                    // (set by the commit request; a rare arrival racing
+                    // in between is misattributed — a day-one residual).
                     let digest = e.meta.as_ref().map(|m| m.digest.clone());
+                    if self.awaiting_commit {
+                        self.awaiting_commit = false;
+                        if let Some(d) = digest.clone() {
+                            self.sent.push((d, !self.peers.is_empty()));
+                        }
+                    }
+                    // Dedup by digest guards against a re-announced
+                    // row (a refetch, a replay). Routing: a row
+                    // continuing the OPEN thread (its prev addresses
+                    // the transcript's tip) appends live; anything
+                    // else only refreshes the thread list.
                     let unseen = digest.as_ref().is_none_or(|d| {
                         !self
                             .entries
@@ -392,6 +459,13 @@ impl App {
                             self.entries.push(e);
                             let n = self.entries.len();
                             self.transcript_sel.select(Some(n - 1));
+                        } else if self.open_thread.is_none() {
+                            // Nothing open: show the row and adopt its
+                            // thread (a fresh commit's first prev IS
+                            // the thread id — the genesis parent ref).
+                            self.entries = vec![e.clone()];
+                            self.open_thread = e.prev.first().cloned();
+                            self.transcript_sel.select(Some(0));
                         }
                         self.refresh_threads();
                         self.flash = Some("msg arrived".into());
@@ -439,10 +513,27 @@ impl App {
             // The core's own identity card, displayed verbatim (the
             // paste source for the counterpart's address book).
             Some(Out::SelfPush(s)) => self.self_card = Some(s.card),
-            // The received-frontier statement is not on the landed
-            // face yet; the surface ignores it until the core
-            // delivers it.
-            Some(Out::MailAcked(_)) => {}
+            // The receipt frontier for one counterpart. Statements
+            // are unmerged and monotone per anchor; the first one
+            // anchors the session base. Self-records in the target
+            // set state their own frontier — the same commit stream,
+            // the same math, no special casing needed.
+            Some(Out::MailAcked(m)) => {
+                if m.up_to == 0 {
+                    return;
+                }
+                match self.acked.iter_mut().find(|a| a.anchor == m.to_mailbox) {
+                    Some(a) => a.up_to = a.up_to.max(m.up_to),
+                    None => {
+                        let mailed_so_far = self.sent.iter().filter(|(_, m)| *m).count() as u64;
+                        self.acked.push(Acked {
+                            base: m.up_to.saturating_sub(mailed_so_far),
+                            anchor: m.to_mailbox,
+                            up_to: m.up_to,
+                        })
+                    }
+                }
+            }
             Some(Out::Error(e)) => {
                 self.last_error = Some(e);
                 self.flash = None;

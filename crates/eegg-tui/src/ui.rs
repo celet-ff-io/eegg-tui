@@ -102,12 +102,7 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
                 .border_style(Color::Yellow),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    ratatui::widgets::StatefulWidget::render(
-        &list_w,
-        list,
-        f.buffer_mut(),
-        &mut app.peers_sel,
-    );
+    ratatui::widgets::StatefulWidget::render(&list_w, list, f.buffer_mut(), &mut app.peers_sel);
 
     if app.peer_input_active {
         Paragraph::new(Line::from(vec![
@@ -121,8 +116,7 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
             + app
                 .peer_input
                 .visual_cursor()
-                .min(input.width.saturating_sub(13) as usize)
-                as u16;
+                .min(input.width.saturating_sub(13) as usize) as u16;
         f.set_cursor_position((col, input.y + 1));
     }
 }
@@ -157,10 +151,24 @@ fn render_status(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     });
     let flash = app.flash.as_ref().map(|m| Span::from(m).yellow());
     let extra = error.or(flash).unwrap_or_else(|| Span::from(""));
+    let delivery = {
+        let (covered, mailed) = app.delivered();
+        if mailed > 0 {
+            Span::from(format!("delivered {covered}/{mailed}")).style(if covered == mailed as u64 {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Cyan)
+            })
+        } else {
+            Span::from("")
+        }
+    };
     Line::from(vec![
         core,
         Span::from("  "),
         cursor,
+        Span::from("  "),
+        delivery,
         Span::from("  "),
         extra,
     ])
@@ -185,7 +193,14 @@ fn render_threads(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
 }
 
 fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
-    let items: Vec<ListItem> = app.entries.iter().map(entry_item).collect();
+    let items: Vec<ListItem> = app
+        .entries
+        .iter()
+        .map(|e| {
+            let digest = e.meta.as_ref().map(|m| m.digest.clone()).unwrap_or_default();
+            entry_item(e, app.row_received(&digest))
+        })
+        .collect();
     let list = List::new(items)
         .block(
             Block::bordered()
@@ -196,7 +211,7 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
     ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.transcript_sel);
 }
 
-fn entry_item(e: &zconned_stdio_types::Entry) -> ListItem<'static> {
+fn entry_item(e: &zconned_stdio_types::Entry, received: Option<bool>) -> ListItem<'static> {
     let ts = e
         .meta
         .as_ref()
@@ -219,19 +234,33 @@ fn entry_item(e: &zconned_stdio_types::Entry) -> ListItem<'static> {
         .map(|c| c.kind.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    ListItem::from(Line::from(vec![
+    // The delivery marker: ✓ = every stated frontier covers the row;
+    // a bare dot = sent, receipt pending; nothing = an arrival or a
+    // pre-session row (the interface does not know its facts).
+    let marker = received.map(|r| {
+        if r {
+            Span::from(" \u{2713}").green()
+        } else {
+            Span::from(" \u{00b7}").dark_gray()
+        }
+    });
+    let mut line = vec![
         Span::from(ts).dark_gray(),
         Span::from(" "),
         Span::from(digest).cyan(),
-        Span::from("  "),
-        Span::from(content.unwrap_or_else(|| "(no content)".into())),
-        Span::from(if claims.is_empty() {
-            String::new()
-        } else {
-            format!("   [{claims}]")
-        })
-        .dark_gray(),
-    ]))
+    ];
+    if let Some(m) = marker {
+        line.push(m);
+    }
+    line.push(Span::from("  "));
+    line.push(Span::from(content.unwrap_or_else(|| "(no content)".into())));
+    line.push(Span::from(if claims.is_empty() {
+        String::new()
+    } else {
+        format!("   [{claims}]")
+    })
+    .dark_gray());
+    ListItem::from(Line::from(line))
 }
 
 fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
@@ -271,7 +300,9 @@ fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         Pane::Threads => {
             "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} Tab next \u{00b7} q quit"
         }
-        Pane::Transcript => "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} Tab next \u{00b7} q quit",
+        Pane::Transcript => {
+            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} Tab next \u{00b7} q quit"
+        }
         Pane::Compose => "Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
     };
     Paragraph::new(Span::from(hints).dark_gray())

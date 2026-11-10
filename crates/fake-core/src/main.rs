@@ -11,6 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::Engine as _;
 use bytes::BytesMut;
 use clap::{
     Parser,
@@ -22,7 +23,6 @@ use clap::{
 use clap_verbosity_flag::{Verbosity, WarnLevel};
 use prost::Message;
 use protobuf_varint_deframer::Deframer;
-use base64::Engine as _;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, ResourceRef, Value, resource_digest};
 use zconned_stdio_types::{
     Handshake, IncomingFrame, OutgoingFrame, PROTOCOL_VERSION, incoming_frame::Method,
@@ -154,7 +154,9 @@ fn card_text(peer: &zconned_stdio_types::Peer) -> String {
 }
 
 fn peer_from_card(card: &str) -> Option<zconned_stdio_types::Peer> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(card.trim()).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(card.trim())
+        .ok()?;
     zconned_stdio_types::Peer::decode(bytes.as_slice()).ok()
 }
 

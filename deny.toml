@@ -198,15 +198,15 @@ deny = [
 
 # Certain crates/versions that will be skipped when doing duplicate detection.
 skip = [
-  # All of these flow in through the zconned-* PATH deps — the fixes
-  # live in the LPZ106 tree (read-only for this repo); each skip lifts
-  # when 106's stack moves.
+  # All of these flow in through the zconned-* PATH deps (a separate
+  # zconn checkout) — the fixes live in that workspace; each skip
+  # lifts when the zconn stack moves.
   { crate = "block-buffer@0.10.4", reason = "the RustCrypto 0.10-era stack (aead 0.5 / sha3 0.10 via zconned-crypto); lifts when its digest-0.11 generation ships" },
-  { crate = "crypto-common@0.1.7", reason = "the RustCrypto 0.10-era stack (aead 0.5); lifts with the same 106 move" },
-  { crate = "digest@0.10.7", reason = "the RustCrypto 0.10-era stack (sha3 0.10 / aead 0.5); lifts with the same 106 move" },
-  { crate = "generic-array@0.14.7", reason = "the RustCrypto 0.10-era stack (aead 0.5); lifts with the same 106 move" },
-  { crate = "cpufeatures@0.2.17", reason = "the RustCrypto 0.10-era stack (chacha20 0.9 / sha3 0.10); lifts with the same 106 move" },
-  { crate = "rand_core@0.6.4", reason = "the RustCrypto 0.10-era stack (crypto-common 0.1); lifts with the same 106 move" },
+  { crate = "crypto-common@0.1.7", reason = "the RustCrypto 0.10-era stack (aead 0.5); lifts with the same zconn crypto-stack move" },
+  { crate = "digest@0.10.7", reason = "the RustCrypto 0.10-era stack (sha3 0.10 / aead 0.5); lifts with the same zconn crypto-stack move" },
+  { crate = "generic-array@0.14.7", reason = "the RustCrypto 0.10-era stack (aead 0.5); lifts with the same zconn crypto-stack move" },
+  { crate = "cpufeatures@0.2.17", reason = "the RustCrypto 0.10-era stack (chacha20 0.9 / sha3 0.10); lifts with the same zconn crypto-stack move" },
+  { crate = "rand_core@0.6.4", reason = "the RustCrypto 0.10-era stack (crypto-common 0.1); lifts with the same zconn crypto-stack move" },
   { crate = "getrandom@0.2.17", reason = "rand_core 0.6 pins the older getrandom line (the RustCrypto 0.10-era stack)" },
   { crate = "syn@2.0.119", reason = "curve25519-dalek-derive pins the older syn (derive_more/crossterm uses syn 3); lifts with a dalek release" },
   { crate = "hashbrown@0.15.5", reason = "petgraph (prost-build) pins the older line; lifts with a petgraph release" },

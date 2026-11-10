@@ -6,7 +6,8 @@
 //! exactly one core; client EOF is the only legal shutdown.
 //!
 //! This milestone: a UI-complete shell — the real client mechanism
-//! against fake cores; features attach when LPZ106 completes.
+//! against fake cores; features attach as the zconn stack completes
+//! them.
 
 pub mod app;
 pub mod cli;

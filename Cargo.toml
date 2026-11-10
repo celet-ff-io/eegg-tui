@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*"]
-# The 106 symlink farm is INSIDE the root dir; without the exclude,
+# The linked zconn tree is INSIDE the root dir; without the exclude,
 # cargo claims those path deps for THIS workspace (lexical path
 # membership) and their `workspace = true` inheritance breaks.
 exclude = ["local-deps"]
@@ -18,10 +18,12 @@ publish = false
 rust-version = "1.98"
 
 [workspace.dependencies]
-# --- LPZ106 protocol-products crates (path deps; LPZ106 is READ-ONLY) ---
-# Note: zconned-io-link (the 106 async/tokio adapter) is deliberately
-# NOT consumed — C2 model runs no async runtime; the reader threads use
-# the SYNC deframer state machine directly.
+# --- zconn workspace crates, consumed as path deps from a separate
+# local checkout (that checkout is READ-ONLY for this repo) ---
+# Note: zconned-io-link (the async/tokio adapter in that workspace)
+# is deliberately NOT consumed — the event loop runs no async
+# runtime; the reader threads use the SYNC deframer state machine
+# directly.
 # The paths go through the gitignored `local-deps/` directory: a
 # symlink to a zconn checkout AT WHATEVER LOCATION THE MACHINE KEEPS
 # IT — every machine's project layout differs, and this one link is
@@ -30,10 +32,10 @@ rust-version = "1.98"
 # per-crate copies: cargo resolves a dep's workspace inheritance by
 # walking up the LINK path, so a bare crate link would fall into THIS
 # workspace; the whole tree keeps zconn's own root workspace in the
-# walk. After a fresh clone, recreate it (this machine's layout as
-# the example):
+# walk. After a fresh clone, recreate it (point the link at the
+# zconn checkout THIS machine keeps):
 #   mkdir -p local-deps && \
-#     ln -s ../../../../lpz106/code/zconn local-deps/zconn
+#     ln -s /path/to/zconn local-deps/zconn
 protobuf-varint-deframer = { path = "local-deps/zconn/crates/protobuf-varint-deframer" }
 zconned-stdio-types = { path = "local-deps/zconn/crates/zconned-stdio-types" }
 zconned-material = { path = "local-deps/zconn/crates/zconned-material" }
@@ -57,10 +59,10 @@ tui-input = "0.15.5"
 # --- TUI stack (decided: ratatui + crossterm) ---
 ratatui = "0.30.2"
 
-# --- concurrency model C2 (producer threads + single channel) ---
+# --- single-channel producer/consumer model (producer threads + one channel) ---
 crossbeam-channel = "0.5.17"
 
-# --- house style (inherited from LPZ106 rules C+) ---
+# --- workspace house style ---
 tap = "1.0.1"
 thiserror = "2.0.21"
 miette = { version = "7.6.0", features = ["fancy"] }

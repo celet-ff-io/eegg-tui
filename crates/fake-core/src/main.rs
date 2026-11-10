@@ -1,8 +1,8 @@
 //! fake-core — a minimal stand-in for the `zconned` core process, built
 //! to drive the eegg shell. The real wire contract (handshake v2,
 //! framed protobuf, the day-one verb set), a toy in-memory state
-//! behind it. NOT the core: core logic lives in LPZ106 — this exists
-//! so the interface can run without it.
+//! behind it. NOT the core: core logic lives in the zconn workspace —
+//! this exists so the interface can run without it.
 
 use std::{
     collections::HashMap,

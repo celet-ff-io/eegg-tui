@@ -56,8 +56,8 @@
               rust-analyzer
               rustfmt
               clippy
-              # eegg builds the LPZ106 crates from source (path deps);
-              # their build.rs drives protoc.
+              # eegg builds the zconn workspace crates from source
+              # (path deps); their build.rs drives protoc.
               protobuf
             ];
             shellHook = ''

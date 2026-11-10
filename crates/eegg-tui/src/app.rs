@@ -882,6 +882,20 @@ impl App {
                 self.transcript_sel.select(sel.filter(|_| n > 0));
             }
             Some(Out::ResourcePush(p)) => {
+                // A value that just landed in the core patches the
+                // matching value-absent rows of the open transcript
+                // in place — no full log re-read needed.
+                if let (Some(r), Some(v)) = (p.r#ref.as_ref(), p.value.clone()) {
+                    for e in &mut self.entries {
+                        if let Some(slot) = e.content.as_mut() {
+                            let absent = slot.r#ref.as_ref().is_some_and(|c| c.digest == r.digest)
+                                && slot.value.is_none();
+                            if absent {
+                                slot.value = Some(v.clone());
+                            }
+                        }
+                    }
+                }
                 self.flash = Some(match (p.r#ref.as_ref(), p.value) {
                     (Some(r), _) if r.digest.is_empty() => "resource: empty ref".into(),
                     (Some(r), Some(v)) => format!(

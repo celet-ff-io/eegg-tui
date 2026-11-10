@@ -22,6 +22,7 @@ use clap::{
 use clap_verbosity_flag::{Verbosity, WarnLevel};
 use prost::Message;
 use protobuf_varint_deframer::Deframer;
+use base64::Engine as _;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, ResourceRef, Value, resource_digest};
 use zconned_stdio_types::{
     Handshake, IncomingFrame, OutgoingFrame, PROTOCOL_VERSION, incoming_frame::Method,
@@ -41,6 +42,13 @@ static STYLES: Styles = Styles::styled()
 struct Args {
     #[command(flatten)]
     verbose: Verbosity<WarnLevel>,
+
+    /// Toy-only: push a synthetic network arrival (a fresh thread with
+    /// one message) this many milliseconds after the handshake. The
+    /// real core never takes this flag — it exists so the shell's
+    /// arrival path is testable without a relay.
+    #[arg(long, value_name = "MS")]
+    arrive_after_ms: Option<u64>,
 }
 
 type Result<T> = core::result::Result<T, Error>;
@@ -61,13 +69,13 @@ enum Error {
 /// Sync framed reader over a std stream (the deframer state machine,
 /// the sync core underneath the async io-link adapter).
 struct Reader {
-    stream: Box<dyn std::io::Read>,
+    stream: Box<dyn std::io::Read + Send>,
     buf: BytesMut,
     deframer: Deframer,
 }
 
 impl Reader {
-    fn new(stream: Box<dyn std::io::Read>) -> Self {
+    fn new(stream: Box<dyn std::io::Read + Send>) -> Self {
         Self {
             stream,
             buf: BytesMut::new(),
@@ -109,6 +117,9 @@ struct Thread {
 struct FakeCore {
     threads: Vec<Thread>,
     peers: Vec<zconned_stdio_types::Peer>,
+    /// The toy identity behind `self_get` (random bytes; the card is
+    /// only ever exchanged with this same toy).
+    self_peer: zconned_stdio_types::Peer,
     cursor: Vec<MsgRef>,
     content: Option<Value>,
     claims: Vec<Value>,
@@ -116,11 +127,43 @@ struct FakeCore {
     entropy: u64,
 }
 
+/// A toy identity: random public halves and a random signature — the
+/// toy verifies nothing and signs nothing real.
+fn toy_peer() -> zconned_stdio_types::Peer {
+    let mut urandom = std::fs::File::open("/dev/urandom").expect("os randomness");
+    let mut random = |n: usize| {
+        let mut v = vec![0u8; n];
+        std::io::Read::read_exact(&mut urandom, &mut v).expect("os randomness");
+        v
+    };
+    zconned_stdio_types::Peer {
+        ver: 1,
+        sign_algo: "ed25519".into(),
+        sign_pub: random(32),
+        dh_algo: "x25519".into(),
+        static_dh_pub: random(32),
+        sig: random(64),
+        endpoints: Vec::new(),
+    }
+}
+
+/// The card text: the canonical single-line base64 of the record's
+/// protobuf encoding (the real core's form, mirrored).
+fn card_text(peer: &zconned_stdio_types::Peer) -> String {
+    base64::engine::general_purpose::STANDARD.encode(peer.encode_to_vec())
+}
+
+fn peer_from_card(card: &str) -> Option<zconned_stdio_types::Peer> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(card.trim()).ok()?;
+    zconned_stdio_types::Peer::decode(bytes.as_slice()).ok()
+}
+
 impl FakeCore {
     fn new() -> Self {
         Self {
             threads: Vec::new(),
             peers: Vec::new(),
+            self_peer: toy_peer(),
             cursor: Vec::new(),
             content: None,
             claims: Vec::new(),
@@ -294,20 +337,87 @@ impl FakeCore {
                     })),
                 }]
             }
-            // The fake stores peer records as-is: signature
-            // verification is core logic, and the toy keeps none.
+            // The fake stores peer records without signature
+            // verification (core logic the toy keeps none of); the
+            // set is upsert-style by the record's public key, and a
+            // pasted card decodes exactly one form.
             Method::PeerSet(s) => {
-                if let Some(peer) = s.peer {
-                    self.peers.push(peer);
+                let peer = match (s.peer, s.card) {
+                    (Some(p), _) => Some(p),
+                    (None, Some(card)) => peer_from_card(&card),
+                    (None, None) => None,
+                };
+                if let Some(p) = peer {
+                    match self.peers.iter_mut().find(|x| x.sign_pub == p.sign_pub) {
+                        Some(slot) => *slot = p,
+                        None => self.peers.push(p),
+                    }
                 }
-                Vec::new()
+                self.peers_push()
             }
-            Method::PeersGet(_) => vec![OutgoingFrame {
-                frame: Some(Out::PeersPush(zconned_stdio_types::PeersPush {
-                    peers: self.peers.clone(),
+            Method::PeersGet(_) => self.peers_push(),
+            Method::SelfGet(_) => vec![OutgoingFrame {
+                frame: Some(Out::SelfPush(zconned_stdio_types::SelfPush {
+                    card: card_text(&self.self_peer),
                 })),
             }],
         }
+    }
+
+    fn peers_push(&self) -> Vec<OutgoingFrame> {
+        vec![OutgoingFrame {
+            frame: Some(Out::PeersPush(zconned_stdio_types::PeersPush {
+                peers: self.peers.clone(),
+            })),
+        }]
+    }
+
+    /// The synthetic arrival: a fresh thread with one message, stated
+    /// through the same statements a real arrival would use.
+    fn arrive(&mut self) -> Vec<OutgoingFrame> {
+        let id = self.fresh_ref();
+        let content = Value {
+            kind: "text/plain".into(),
+            data: "hello from the network (synthetic arrival)".into(),
+        };
+        let content_ref = self.resource(&content);
+        let entry = zconned_stdio_types::Entry {
+            ver_major: 1,
+            ver_minor: 0,
+            prev: vec![id.clone()],
+            meta: Some(zconned_stdio_types::RowMeta {
+                ts: Some(self.now_ts()),
+                algo: "sha3-256".into(),
+                digest: resource_digest("application/vnd.zconn.msg", &content_ref.digest).to_vec(),
+            }),
+            content: Some(zconned_stdio_types::ResolvedSlot {
+                r#ref: Some(content_ref),
+                value: Some(content),
+            }),
+            claims: Vec::new(),
+        };
+        self.threads.push(Thread {
+            id: id.clone(),
+            log: vec![entry.clone()],
+        });
+        vec![
+            OutgoingFrame {
+                frame: Some(Out::MsgAdded(zconned_stdio_types::MsgAdded {
+                    entry: Some(entry),
+                })),
+            },
+            OutgoingFrame {
+                frame: Some(Out::MsgThreadsPush(zconned_stdio_types::MsgThreadsPush {
+                    threads: self
+                        .threads
+                        .iter()
+                        .map(|t| zconned_stdio_types::ThreadEntry {
+                            thread: Some(t.id.clone()),
+                        })
+                        .collect(),
+                })),
+            },
+        ]
     }
 
     fn commit(&mut self) -> Vec<OutgoingFrame> {
@@ -386,7 +496,11 @@ impl FakeCore {
     }
 }
 
-fn serve(mut reader: Reader, mut stdout: impl std::io::Write) -> Result<()> {
+fn serve(
+    mut reader: Reader,
+    mut stdout: impl std::io::Write,
+    arrive_after_ms: Option<u64>,
+) -> Result<()> {
     let Handshake { version: theirs } = reader
         .read_frame::<Handshake>()?
         .ok_or(Error::TruncatedFrame)?; // eof before handshake
@@ -404,12 +518,45 @@ fn serve(mut reader: Reader, mut stdout: impl std::io::Write) -> Result<()> {
     )?;
     log::info!("handshake ok (version {PROTOCOL_VERSION})");
 
+    // The frames arrive from a reader thread; the optional synthetic
+    // arrival from a timer thread — the serve loop selects over both.
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<IncomingFrame>(16);
+    let (tick_tx, tick_rx) = crossbeam_channel::bounded::<()>(1);
+    let reader_thread = std::thread::spawn(move || {
+        while let Ok(Some(f)) = reader.read_frame::<IncomingFrame>() {
+            if frame_tx.send(f).is_err() {
+                break;
+            }
+        }
+    });
+    if let Some(ms) = arrive_after_ms {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let _ = tick_tx.send(());
+        });
+    }
+
     let mut core = FakeCore::new();
-    while let Some(f) = reader.read_frame::<IncomingFrame>()? {
-        for out in core.handle(f) {
-            write_frame(&mut stdout, &out)?;
+    loop {
+        crossbeam_channel::select! {
+            recv(frame_rx) -> f => match f {
+                Ok(f) => {
+                    for out in core.handle(f) {
+                        write_frame(&mut stdout, &out)?;
+                    }
+                }
+                // The reader thread ended (client EOF or a framing
+                // failure) — the session is over either way.
+                Err(_) => break,
+            },
+            recv(tick_rx) -> _ => {
+                for out in core.arrive() {
+                    write_frame(&mut stdout, &out)?;
+                }
+            }
         }
     }
+    let _ = reader_thread.join();
     log::info!("client disconnected (eof)");
     Ok(())
 }
@@ -422,7 +569,7 @@ fn main() -> ExitCode {
     .init();
 
     let reader = Reader::new(Box::new(std::io::stdin()));
-    match serve(reader, std::io::stdout()) {
+    match serve(reader, std::io::stdout(), args.arrive_after_ms) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("fake-core: {e}");

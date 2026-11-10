@@ -25,9 +25,15 @@ pub struct Cli {
     /// Core command line to spawn, shlex-split.
     ///
     /// Resolution order is this flag first, then the `EEGG__CORE`
-    /// environment variable, then `"fake-core"` looked up through PATH.
+    /// environment variable, then `"zconned"` looked up through PATH.
     #[arg(long, value_name = "CMDLINE")]
     pub core: Option<String>,
+
+    /// Relay URL, handed to the spawned core as `--relay <URL>` on its
+    /// argv (the single pass-through form). Absent = the core runs
+    /// stdio-only (records stay local; nothing reaches a relay).
+    #[arg(long, value_name = "URL")]
+    pub relay: Option<String>,
 
     /// Log file (the black-box). Defaults to `eegg.log` under the XDG
     /// state dir (`~/.local/state/eegg/`).

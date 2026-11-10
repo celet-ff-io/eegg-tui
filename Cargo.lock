@@ -744,9 +744,11 @@ dependencies = [
 name = "fake-core"
 version = "0.1.0-alpha"
 dependencies = [
+ "base64",
  "bytes",
  "clap",
  "clap-verbosity-flag",
+ "crossbeam-channel",
  "env_logger",
  "jiff",
  "log",

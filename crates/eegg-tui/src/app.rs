@@ -11,11 +11,11 @@ use tui_input::backend::crossterm::EventHandler as _;
 use zconned_material::{MsgRef, Value};
 use zconned_stdio_types::{
     Entry, Error as FrameError, Fresh, IncomingFrame, MsgCursorSet, MsgDraftCommit,
-    MsgDraftContentSet, MsgDraftGet, MsgThreadsGet, MsgThreadsLogGet, incoming_frame::Method,
-    outgoing_frame::Frame as Out,
+    MsgDraftContentSet, MsgDraftGet, MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet, PeersGet,
+    SelfGet, incoming_frame::Method, outgoing_frame::Frame as Out,
 };
 
-use crate::core::Core;
+use crate::core::Process;
 use crate::events::Evt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,11 +32,26 @@ pub struct App {
     pub thread_sel: ListState,
     pub entries: Vec<Entry>,
     pub transcript_sel: ListState,
+    /// The thread whose log the transcript currently shows (the reply
+    /// base and the arrival-routing hint).
+    pub open_thread: Option<MsgRef>,
     pub input: Input,
     /// The staged commit base (from msg_cursor_push; empty = not set).
     pub cursor: Vec<MsgRef>,
+    /// Set by the new-thread key: the next send starts a FRESH chain
+    /// even though a thread transcript is open.
+    pub new_thread_intent: bool,
     /// The working draft (from msg_draft_push).
     pub staged: Option<(Option<Value>, Vec<Value>)>,
+    /// The send-target set (the whole resting set, replaced on every
+    /// delivery) and the core's own identity card (verbatim — the
+    /// copy source for the counterpart's paste-in).
+    pub peers: Vec<Peer>,
+    pub self_card: Option<String>,
+    pub show_peers: bool,
+    pub peers_sel: ListState,
+    pub peer_input: Input,
+    pub peer_input_active: bool,
     pub last_error: Option<FrameError>,
     /// One-shot notice (commit receipt / resource answer / write failure).
     pub flash: Option<String>,
@@ -66,9 +81,17 @@ impl App {
             thread_sel: ListState::default(),
             entries: Vec::new(),
             transcript_sel: ListState::default(),
+            open_thread: None,
             input: Input::default(),
             cursor: Vec::new(),
+            new_thread_intent: false,
             staged: None,
+            peers: Vec::new(),
+            self_card: None,
+            show_peers: false,
+            peers_sel: ListState::default(),
+            peer_input: Input::default(),
+            peer_input_active: false,
             last_error: None,
             flash: None,
             core_alive: true,
@@ -77,6 +100,14 @@ impl App {
             outbox: Vec::new(),
             quit: false,
         }
+    }
+
+    /// The attach-time requests: the thread list, the peer set, and
+    /// the core's own identity card.
+    pub fn session_open(&mut self) {
+        self.refresh_threads();
+        self.refresh_peers();
+        self.refresh_self();
     }
 
     pub fn refresh_threads(&mut self) {
@@ -88,6 +119,18 @@ impl App {
     fn refresh_draft(&mut self) {
         self.outbox.push(IncomingFrame {
             method: Some(Method::MsgDraftGet(MsgDraftGet {})),
+        });
+    }
+
+    fn refresh_peers(&mut self) {
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::PeersGet(PeersGet {})),
+        });
+    }
+
+    fn refresh_self(&mut self) {
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::SelfGet(SelfGet {})),
         });
     }
 
@@ -125,6 +168,7 @@ impl App {
         if let Some(t) = thread {
             self.entries.clear();
             self.transcript_sel.select(Some(0));
+            self.open_thread = Some(t.clone());
             self.outbox.push(IncomingFrame {
                 method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
                     thread: Some(t),
@@ -134,21 +178,54 @@ impl App {
         }
     }
 
+    /// The thread continuation base for a reply: the transcript's
+    /// last seen entry, addressed by its digest (the message ref).
+    fn open_thread_tip(&self) -> Option<MsgRef> {
+        let last = self.entries.last()?;
+        let meta = last.meta.as_ref()?;
+        Some(MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: meta.algo.clone(),
+            digest: meta.digest.clone(),
+        })
+    }
+
     /// Enter on the compose pane: the commit flow, one hand-typed
-    /// frame per step (cursor → content → commit).
+    /// frame per step (cursor → content → commit). An unset cursor
+    /// replies to the OPEN thread (at = its tip); with no open thread
+    /// (or a new-thread intent) it starts a fresh chain.
     fn compose_send(&mut self) {
         let text = self.input.value().trim().to_owned();
         if text.is_empty() {
             return;
         }
         if self.cursor.is_empty() {
-            self.outbox.push(IncomingFrame {
-                method: Some(Method::MsgCursorSet(MsgCursorSet {
-                    at: Vec::new(),
-                    fresh: Some(Fresh {}),
-                })),
-            });
+            let reply_base = if self.new_thread_intent {
+                None
+            } else {
+                self.open_thread_tip()
+            };
+            match reply_base {
+                Some(tip) => {
+                    self.outbox.push(IncomingFrame {
+                        method: Some(Method::MsgCursorSet(MsgCursorSet {
+                            at: vec![tip],
+                            fresh: None,
+                        })),
+                    });
+                }
+                None => {
+                    self.outbox.push(IncomingFrame {
+                        method: Some(Method::MsgCursorSet(MsgCursorSet {
+                            at: Vec::new(),
+                            fresh: Some(Fresh {}),
+                        })),
+                    });
+                }
+            }
         }
+        self.new_thread_intent = false;
         self.outbox.push(IncomingFrame {
             method: Some(Method::MsgDraftContentSet(MsgDraftContentSet {
                 kind: "text/plain".into(),
@@ -161,6 +238,57 @@ impl App {
         self.input.reset();
     }
 
+    /// Keys while the peers popup is up; `false` = the popup closed
+    /// (the caller's key handling ends here).
+    fn on_key_peers(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{Event, KeyCode};
+        match (self.peer_input_active, key.code) {
+            // Typing the pasted card: Enter submits, Esc cancels the
+            // input (a second Esc closes the popup).
+            (true, KeyCode::Enter) => {
+                let card = self.peer_input.value().trim().to_owned();
+                if !card.is_empty() {
+                    self.outbox.push(IncomingFrame {
+                        method: Some(Method::PeerSet(PeerSet {
+                            peer: None,
+                            card: Some(card),
+                        })),
+                    });
+                    self.peer_input.reset();
+                    self.peer_input_active = false;
+                    self.flash = Some("peer submitted".into());
+                }
+            }
+            (true, KeyCode::Esc) => {
+                self.peer_input.reset();
+                self.peer_input_active = false;
+            }
+            (true, _) => {
+                self.peer_input.handle_event(&Event::Key(key));
+            }
+            // Listing posture.
+            (false, KeyCode::Char('a')) => self.peer_input_active = true,
+            (false, KeyCode::Up | KeyCode::Char('k')) => {
+                let n = self.peers.len();
+                let i = self.peers_sel.selected().unwrap_or(0);
+                self.peers_sel
+                    .select((n > 0).then_some(i.saturating_sub(1)));
+            }
+            (false, KeyCode::Down | KeyCode::Char('j')) => {
+                let n = self.peers.len();
+                let i = self.peers_sel.selected().unwrap_or(0);
+                self.peers_sel
+                    .select((n > 0).then_some((i + 1).min(n - 1)));
+            }
+            (false, KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q')) => {
+                self.show_peers = false;
+                return false;
+            }
+            (false, _) => {}
+        }
+        true
+    }
+
     fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{Event, KeyCode};
 
@@ -169,6 +297,11 @@ impl App {
             if matches!(key.code, KeyCode::Char('q')) {
                 self.quit = true;
             }
+            return;
+        }
+
+        if self.show_peers {
+            self.on_key_peers(key);
             return;
         }
 
@@ -209,6 +342,23 @@ impl App {
             },
             KeyCode::Char('t') if self.focus == Pane::Threads => self.refresh_threads(),
             KeyCode::Char('r') => self.refresh_draft(),
+            // New-thread compose: the next send starts a fresh chain
+            // even though a thread transcript is open.
+            KeyCode::Char('n') => {
+                self.new_thread_intent = true;
+                self.focus = Pane::Compose;
+                self.flash = Some("new thread".into());
+            }
+            // The peers popup: the set + the core's own card, one
+            // refresh per open (cheap, and the set is small).
+            KeyCode::Char('p') => {
+                self.show_peers = true;
+                self.peer_input_active = false;
+                self.peers_sel
+                    .select((!self.peers.is_empty()).then_some(0));
+                self.refresh_peers();
+                self.refresh_self();
+            }
             KeyCode::Enter if self.focus == Pane::Threads => self.open_selected_thread(),
             _ => {}
         }
@@ -220,8 +370,32 @@ impl App {
         match f.frame {
             Some(Out::MsgAdded(a)) => {
                 if let Some(e) = a.entry {
-                    self.entries.push(e);
-                    self.flash = Some("committed".into());
+                    // Commit receipts and network arrivals share this
+                    // one statement; dedup by digest guards against a
+                    // re-announced row (a refetch, a replay). Routing:
+                    // a row continuing the OPEN thread (its prev
+                    // addresses the transcript's tip) appends live;
+                    // anything else only refreshes the thread list.
+                    let digest = e.meta.as_ref().map(|m| m.digest.clone());
+                    let unseen = digest.as_ref().is_none_or(|d| {
+                        !self
+                            .entries
+                            .iter()
+                            .any(|x| x.meta.as_ref().is_some_and(|m| m.digest == *d))
+                    });
+                    if unseen {
+                        let continues = self
+                            .open_thread_tip()
+                            .map(|tip| e.prev.iter().any(|r| r.digest == tip.digest))
+                            .unwrap_or(false);
+                        if continues {
+                            self.entries.push(e);
+                            let n = self.entries.len();
+                            self.transcript_sel.select(Some(n - 1));
+                        }
+                        self.refresh_threads();
+                        self.flash = Some("msg arrived".into());
+                    }
                 }
             }
             Some(Out::MsgCursorPush(p)) => self.cursor = p.refs,
@@ -259,9 +433,16 @@ impl App {
                     (None, _) => "resource: no ref".into(),
                 });
             }
-            // The peer domain is not on this milestone's surface; the
-            // interface never asks for it, so a push cannot arrive.
-            Some(Out::PeersPush(_)) => {}
+            // The whole resting set — replaced wholesale, never
+            // merged (the core's set is the truth).
+            Some(Out::PeersPush(p)) => self.peers = p.peers,
+            // The core's own identity card, displayed verbatim (the
+            // paste source for the counterpart's address book).
+            Some(Out::SelfPush(s)) => self.self_card = Some(s.card),
+            // The received-frontier statement is not on the landed
+            // face yet; the surface ignores it until the core
+            // delivers it.
+            Some(Out::MailAcked(_)) => {}
             Some(Out::Error(e)) => {
                 self.last_error = Some(e);
                 self.flash = None;
@@ -276,7 +457,7 @@ impl App {
     }
 
     /// The main event pump: everything funnels through here.
-    pub fn on_event(&mut self, evt: Evt, core: &mut Option<Core>) {
+    pub fn on_event(&mut self, evt: Evt, core: &mut Option<Process>) {
         match evt {
             Evt::Key(k) => {
                 self.flash = None;

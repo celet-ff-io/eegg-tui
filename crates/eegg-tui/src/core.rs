@@ -50,7 +50,7 @@ pub enum Error {
 
 /// The child process plus the one writable pipe (core stdin).
 #[derive(Debug)]
-pub struct Core {
+pub struct Process {
     child: Child,
     stdin: ChildStdin,
 }
@@ -64,16 +64,23 @@ pub struct CoreStdout {
     deframer: Deframer,
 }
 
-impl Core {
-    /// Spawn the core child (piped stdio). stderr is piped too — the
-    /// full-screen UI must never share the screen with core logs.
-    pub fn spawn(cmdline: &str) -> Result<(Core, ChildStdout, ChildStderrStream)> {
-        let parts = shlex::split(cmdline)
+impl Process {
+    /// Spawn the core child (piped stdio). `relay`, when set, is
+    /// appended to the child's argv as `--relay <URL>` — the single
+    /// pass-through form (the relay address otherwise lives in the
+    /// core's own configuration, never here). stderr is piped too —
+    /// the full-screen UI must never share the screen with core logs.
+    pub fn spawn(cmdline: &str, relay: Option<&str>) -> Result<(Process, ChildStdout, ChildStderrStream)> {
+        let mut parts = shlex::split(cmdline)
             .filter(|p| !p.is_empty())
             .ok_or_else(|| Error::Spawn {
                 cmd: cmdline.into(),
                 source: std::io::Error::other("empty core command"),
             })?;
+        if let Some(url) = relay {
+            parts.push("--relay".into());
+            parts.push(url.into());
+        }
         let mut child = Command::new(&parts[0])
             .args(&parts[1..])
             .stdin(Stdio::piped())

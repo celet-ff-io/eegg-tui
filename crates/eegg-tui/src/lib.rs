@@ -3,11 +3,10 @@
 //!
 //! Spawn the core (`zconned`) as its own dedicated child process over
 //! stdio protobuf (the nvim/LSP-client pattern); one interface owns
-//! exactly one core; client EOF is the only legal shutdown.
-//!
-//! This milestone: a UI-complete shell — the real client mechanism
-//! against fake cores; features attach as the zconn stack completes
-//! them.
+//! exactly one core; client EOF is the only legal shutdown. Core's
+//! data is always the truth: arrivals and deliveries land as the core
+//! states them, and the surface (peers, identity card, received
+//! frontier) renders exactly what the wire carries.
 
 pub mod app;
 pub mod cli;
@@ -23,7 +22,7 @@ use miette::{Context as _, IntoDiagnostic as _};
 
 use crate::app::App;
 use crate::cli::Cli;
-use crate::core::Core;
+use crate::core::Process;
 
 /// Run the interface: logger, spawn, handshake, event loop, teardown.
 pub fn run(cli: &Cli) -> miette::Result<()> {
@@ -51,9 +50,9 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
         .core
         .clone()
         .or_else(|| std::env::var("EEGG__CORE").ok())
-        .unwrap_or_else(|| "fake-core".into());
-    let (mut core, stdout, stderr) =
-        Core::spawn(&cmdline).wrap_err_with(|| format!("spawning core `{cmdline}`"))?;
+        .unwrap_or_else(|| "zconned".into());
+    let (mut core, stdout, stderr) = Process::spawn(&cmdline, cli.relay.as_deref())
+        .wrap_err_with(|| format!("spawning core `{cmdline}`"))?;
     let mut stdout = core::CoreStdout::new(stdout);
     core.handshake(&mut stdout)
         .wrap_err("handshake with core")?;
@@ -76,7 +75,7 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
 
     let mut core = Some(core);
     let mut app = App::new();
-    app.refresh_threads(); // the first hand-typed request
+    app.session_open(); // the first hand-typed requests
     run_loop(&mut core, &mut app, &rx, &mut term)?;
 
     // Teardown order: restore terminal → drop stdin → reader join →
@@ -104,7 +103,7 @@ pub fn run(cli: &Cli) -> miette::Result<()> {
 }
 
 fn run_loop(
-    core: &mut Option<Core>,
+    core: &mut Option<Process>,
     app: &mut App,
     rx: &Receiver<events::Evt>,
     term: &mut ui::Term,

@@ -11,10 +11,10 @@ use ratatui::{
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize as _},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph, Widget as _},
+    widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
 use crate::app::{App, Pane, preview_bytes, short_hex};
@@ -58,6 +58,84 @@ pub fn render(app: &mut App, f: &mut Frame) {
     render_transcript(app, f, transcript);
     render_compose(app, f, compose);
     render_keybar(app, f, keybar);
+    if app.show_peers {
+        render_peers_popup(app, f);
+    }
+}
+
+/// The peers popup: the core's own card on top (copy source), the
+/// send-target set in the middle, the paste-in input at the bottom.
+fn render_peers_popup(app: &mut App, f: &mut Frame) {
+    let area = centered(f.area(), 70, 60);
+    f.render_widget(Clear, area);
+    let [card, list, input] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(if app.peer_input_active { 3 } else { 0 }),
+    ])
+    .areas(area);
+
+    let card_text = app.self_card.clone().unwrap_or_else(|| "(no card)".into());
+    Paragraph::new(Line::from(Span::from(card_text).cyan()))
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(Block::bordered().title(" my card (copy for your counterpart) "))
+        .render(card, f.buffer_mut());
+
+    let items: Vec<ListItem> = app
+        .peers
+        .iter()
+        .map(|p| {
+            let mut line = vec![
+                Span::from(short_hex(&p.sign_pub)).cyan(),
+                Span::from(format!(" {} + {}", p.sign_algo, p.dh_algo)).dark_gray(),
+            ];
+            if !p.endpoints.is_empty() {
+                line.push(Span::from(format!("  {}", p.endpoints.join(" "))));
+            }
+            ListItem::from(Line::from(line))
+        })
+        .collect();
+    let list_w = List::new(items)
+        .block(
+            Block::bordered()
+                .title(format!(" peers ({}) ", app.peers.len()))
+                .border_style(Color::Yellow),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    ratatui::widgets::StatefulWidget::render(
+        &list_w,
+        list,
+        f.buffer_mut(),
+        &mut app.peers_sel,
+    );
+
+    if app.peer_input_active {
+        Paragraph::new(Line::from(vec![
+            Span::from("paste card> ").yellow(),
+            Span::from(app.peer_input.value().to_owned()),
+        ]))
+        .block(Block::bordered().title(" add peer "))
+        .render(input, f.buffer_mut());
+        let col = input.x
+            + 12
+            + app
+                .peer_input
+                .visual_cursor()
+                .min(input.width.saturating_sub(13) as usize)
+                as u16;
+        f.set_cursor_position((col, input.y + 1));
+    }
+}
+
+fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
+    let w = area.width * pct_w / 100;
+    let h = area.height * pct_h / 100;
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 fn render_status(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
@@ -191,10 +269,10 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match app.focus {
         Pane::Threads => {
-            "t refresh \u{00b7} Enter open \u{00b7} j/k move \u{00b7} Tab next pane \u{00b7} q quit"
+            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} Tab next \u{00b7} q quit"
         }
-        Pane::Transcript => "j/k scroll \u{00b7} r staged \u{00b7} Tab next pane \u{00b7} q quit",
-        Pane::Compose => "type \u{00b7} Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
+        Pane::Transcript => "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} Tab next \u{00b7} q quit",
+        Pane::Compose => "Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
     };
     Paragraph::new(Span::from(hints).dark_gray())
         .centered()

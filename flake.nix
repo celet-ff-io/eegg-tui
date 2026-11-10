@@ -61,16 +61,26 @@
               protobuf
             ];
             shellHook = ''
-              # Dev default for eegg: point it at the locally built fake
-              # core, so shell testing is just
-              #   cargo build && cargo run -p eegg-tui
-              # Works for both in-repo and absolute CARGO_TARGET_DIR layouts;
-              # override the env var manually for anything else.
-              case "''${CARGO_TARGET_DIR:-target}" in
-                /*) target_dir="''${CARGO_TARGET_DIR:-target}" ;;
-                *) target_dir="$PWD/''${CARGO_TARGET_DIR:-target}" ;;
-              esac
-              export EEGG__CORE="$target_dir/debug/fake-core"
+              # Dev default for eegg: the REAL core. eegg resolves its
+              # core as --core flag > EEGG__CORE env > "zconned" on
+              # PATH; the hook exports EEGG__CORE to a locally built
+              # zconned when one exists in the shared target dir, so
+              #   cargo build -p zconned --bin zconned && cargo run -p eegg-tui
+              # is the full session. Without a built core the shell
+              # still works — eegg falls back to a PATH lookup.
+              # (fake-core stays the tests-only double, run explicitly
+              # via --core.) Works for both in-repo and absolute
+              # CARGO_TARGET_DIR layouts.
+              for d in "''${CARGO_TARGET_DIR:-target}" "$PWD/target"; do
+                case "$d" in
+                  /*) t="$d" ;;
+                  *) t="$PWD/$d" ;;
+                esac
+                if [ -x "$t/debug/zconned" ]; then
+                  export EEGG__CORE="$t/debug/zconned"
+                  break
+                fi
+              done
             '';
           };
         }

@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use ratatui::widgets::ListState;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
-use zconned_material::{MsgRef, Value, CLAIM_KIND_TS};
+use zconned_material::{CLAIM_KIND_TS, MsgRef, Value};
 use zconned_stdio_types::{
     Entry, Error as FrameError, Fresh, IncomingFrame, MsgCursorSet, MsgDraftCommit,
     MsgDraftContentSet, MsgDraftGet, MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet, PeersGet,
@@ -78,6 +78,9 @@ pub struct App {
     /// The lazygit-style help overlay (opened with `?`); it eats all
     /// keys until closed (Esc / ? / q).
     pub show_help: bool,
+    /// The help overlay's scroll offset (j/k; a short terminal
+    /// scrolls the card instead of clipping it).
+    pub help_scroll: u16,
     pub peers_sel: ListState,
     pub peer_input: Input,
     /// The active bottom box in the peers popup.
@@ -161,6 +164,7 @@ impl App {
             self_card: None,
             show_peers: false,
             show_help: false,
+            help_scroll: 0,
             peers_sel: ListState::default(),
             peer_input: Input::default(),
             card_flow: CardFlow::None,
@@ -409,9 +413,8 @@ impl App {
     /// observably identical).
     fn stamp_needed(&self) -> bool {
         const STAMP_WINDOW_SECS: i64 = 5 * 60;
-        self.ts_stamped_at.is_none_or(|t| {
-            jiff::Timestamp::now().as_second() - t.as_second() >= STAMP_WINDOW_SECS
-        })
+        self.ts_stamped_at
+            .is_none_or(|t| jiff::Timestamp::now().as_second() - t.as_second() >= STAMP_WINDOW_SECS)
     }
 
     /// The position intent precedes EVERY commit: the core keeps its
@@ -451,10 +454,12 @@ impl App {
             })),
         });
         self.outbox.push(IncomingFrame {
-            method: Some(Method::MsgDraftClaimsAdd(zconned_stdio_types::MsgDraftClaimsAdd {
-                kind: CLAIM_KIND_TS.into(),
-                data: Vec::new(),
-            })),
+            method: Some(Method::MsgDraftClaimsAdd(
+                zconned_stdio_types::MsgDraftClaimsAdd {
+                    kind: CLAIM_KIND_TS.into(),
+                    data: Vec::new(),
+                },
+            )),
         });
         self.awaiting_commit = true;
         self.outbox.push(IncomingFrame {
@@ -664,13 +669,20 @@ impl App {
         }
 
         // The help overlay eats every key: only its own close keys
-        // land; the UI underneath stays untouched.
+        // and the scroll land; the UI underneath stays untouched.
         if self.show_help {
-            if matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
-            ) {
-                self.show_help = false;
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                }
+                _ => {}
             }
             return;
         }

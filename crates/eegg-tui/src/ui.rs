@@ -65,7 +65,7 @@ pub fn render(app: &mut App, f: &mut Frame) {
         render_log_popup(app, f);
     }
     if app.show_help {
-        render_help_popup(f);
+        render_help_popup(app, f);
     }
     if app.file_box != crate::app::FileBox::None {
         render_file_box(app, f);
@@ -111,55 +111,80 @@ fn render_file_box(app: &App, f: &mut Frame) {
     f.set_cursor_position((area.x + 1 + prefix.len() as u16 + caret as u16, area.y + 1));
 }
 
-/// The lazygit-style help overlay: the full keymap on one card, above
-/// everything (it may sit over the peers/log popups too). Closed with
-/// Esc / ? / q.
-fn render_help_popup(f: &mut Frame) {
-    let rows: [(&str, &str); 18] = [
-        ("t", "refresh threads"),
-        ("n", "new thread (fresh chain on the next send)"),
-        ("Enter", "open selected thread / send the compose text"),
-        ("j / k \u{2191}\u{2193}", "move the selection"),
-        ("g / G", "jump to the top / the bottom"),
-        ("r", "re-stage the draft (transcript pane)"),
+/// The lazygit-style help overlay: the keymap as SECTIONED CARDS —
+/// one operation per line, grouped by panel — above everything (it
+/// may sit over the peers/log popups too). Closed with Esc / ? / q;
+/// j/k scroll it when the terminal is short.
+fn render_help_popup(app: &mut App, f: &mut Frame) {
+    // (true = an operation row; false = a section header.)
+    let rows: [(bool, &str, &str); 32] = [
+        (false, "threads", ""),
+        (true, "t", "refresh the thread list"),
+        (true, "n", "new thread (fresh chain on the next send)"),
+        (true, "Enter", "open the selected thread"),
+        (true, "j / k \u{2191}\u{2193}", "move the selection"),
+        (true, "g / G", "jump to the top / the bottom"),
+        (false, "transcript", ""),
+        (true, "j / k \u{2191}\u{2193}", "scroll"),
+        (true, "n", "new thread (fresh chain on the next send)"),
+        (true, "r", "re-stage the draft"),
+        (true, "y", "copy the selected row's text to the clipboard"),
+        (true, "w", "save the selected row's text to a file"),
+        (false, "compose", ""),
+        (true, "Enter", "send the compose text"),
+        (true, "Ctrl-C", "copy the compose text to the clipboard"),
+        (true, "Ctrl-V", "paste the clipboard at the caret"),
+        (true, "Ctrl-R", "load the compose text from a file"),
+        (true, "Ctrl-S", "save the compose text to a file"),
+        (true, "Esc", "clear the compose text"),
+        (false, "peers", ""),
+        (true, "p", "open the peers popup"),
+        (true, "c", "copy my card to the clipboard"),
+        (true, "s", "save my card to a file"),
+        (true, "a", "add the counterpart's card"),
+        (true, "Ctrl-V", "paste the card from the clipboard"),
+        (true, "Ctrl-R", "load the card from a file"),
+        (true, "j / k \u{2191}\u{2193}", "move the selection"),
+        (true, "Esc", "back a level / close the popup"),
+        (false, "global", ""),
         (
+            true,
             "Tab",
             "next pane (threads \u{2192} transcript \u{2192} compose)",
         ),
-        ("p", "peers popup"),
-        ("l", "core log popup (the core's stderr ring)"),
-        ("Esc", "clear the input / back / close popups"),
-        ("p \u{00b7} c", "peers: copy my card to the clipboard"),
-        ("p \u{00b7} s", "peers: save my card to a file (~ expands)"),
-        ("p \u{00b7} a", "peers: add the counterpart's card"),
-        ("Ctrl-V", "peers add: paste the card from the clipboard"),
-        ("Ctrl-R", "peers add: load the card from a file"),
-        (
-            "compose",
-            "Ctrl-C copy \u{00b7} Ctrl-V paste \u{00b7} Ctrl-R load file \u{00b7} Ctrl-S save file \u{00b7} Enter send \u{00b7} Esc clear",
-        ),
-        (
-            "transcript",
-            "y copy the row's text \u{00b7} w save the row's text to a file",
-        ),
-        ("q", "quit"),
+        (true, "l", "core log popup (the core's stderr ring)"),
+        (true, "q", "quit"),
     ];
-    let height = rows.len() as u16 + 2;
-    let area = centered(f.area(), 64, height);
-    f.render_widget(Clear, area);
     let lines: Vec<Line> = rows
         .iter()
-        .map(|(key, desc)| {
-            Line::from(vec![
-                Span::from(format!(" {key:<10}")).yellow(),
-                Span::from(desc.to_owned()),
-            ])
+        .map(|(row, key, desc)| {
+            if *row {
+                Line::from(vec![
+                    Span::from(" "),
+                    Span::from(format!("{key:<12}")).yellow(),
+                    Span::from(desc.to_owned()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::from(" "),
+                    Span::from(key.to_uppercase()).bold().light_blue(),
+                ])
+            }
         })
         .collect();
+    // A short terminal: the card scrolls (j/k) instead of clipping.
+    let max_h = f.area().height.saturating_sub(4).max(5);
+    let height = (lines.len() as u16 + 2).min(max_h);
+    let visible = height.saturating_sub(2) as usize;
+    let max_off = lines.len().saturating_sub(visible);
+    app.help_scroll = app.help_scroll.min(max_off as u16);
+    let area = centered(f.area(), 72, height);
+    f.render_widget(Clear, area);
     Paragraph::new(lines)
+        .scroll((app.help_scroll, 0))
         .block(
             Block::bordered()
-                .title(" help \u{00b7} Esc/?/q close ")
+                .title(" help \u{00b7} j/k scroll \u{00b7} Esc/?/q close ")
                 .border_style(Color::Magenta),
         )
         .render(area, f.buffer_mut());

@@ -67,13 +67,55 @@ pub fn render(app: &mut App, f: &mut Frame) {
     if app.show_help {
         render_help_popup(f);
     }
+    if app.file_box != crate::app::FileBox::None {
+        render_file_box(app, f);
+    }
+}
+
+/// The MAIN-window file-path box: what Enter will write/read is set
+/// by the FileBox kind. ~/ expands.
+fn render_file_box(app: &App, f: &mut Frame) {
+    let (title, prefix) = match app.file_box {
+        crate::app::FileBox::None => return,
+        crate::app::FileBox::SaveCompose => (
+            " save compose to file: Enter save \u{00b7} Esc cancel ",
+            "save to> ",
+        ),
+        crate::app::FileBox::LoadCompose => (
+            " load compose from file: Enter load \u{00b7} Esc cancel ",
+            "load from> ",
+        ),
+        crate::app::FileBox::SaveTranscript => (
+            " save row text to file: Enter save \u{00b7} Esc cancel ",
+            "save to> ",
+        ),
+    };
+    let area = centered(f.area(), 64, 3);
+    f.render_widget(Clear, area);
+    let text_width = area.width.saturating_sub(2 + prefix.len() as u16) as usize;
+    let scroll = app.file_input.visual_scroll(text_width);
+    let visible: String = app
+        .file_input
+        .value()
+        .chars()
+        .skip(scroll)
+        .take(text_width)
+        .collect();
+    let caret = app.file_input.visual_cursor() - scroll;
+    Paragraph::new(Line::from(vec![
+        Span::from(prefix).yellow(),
+        Span::from(visible),
+    ]))
+    .block(Block::bordered().title(title).border_style(Color::Magenta))
+    .render(area, f.buffer_mut());
+    f.set_cursor_position((area.x + 1 + prefix.len() as u16 + caret as u16, area.y + 1));
 }
 
 /// The lazygit-style help overlay: the full keymap on one card, above
 /// everything (it may sit over the peers/log popups too). Closed with
 /// Esc / ? / q.
 fn render_help_popup(f: &mut Frame) {
-    let rows: [(&str, &str); 17] = [
+    let rows: [(&str, &str); 18] = [
         ("t", "refresh threads"),
         ("n", "new thread (fresh chain on the next send)"),
         ("Enter", "open selected thread / send the compose text"),
@@ -94,7 +136,11 @@ fn render_help_popup(f: &mut Frame) {
         ("Ctrl-R", "peers add: load the card from a file"),
         (
             "compose",
-            "Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
+            "Ctrl-C copy \u{00b7} Ctrl-V paste \u{00b7} Ctrl-R load file \u{00b7} Ctrl-S save file \u{00b7} Enter send \u{00b7} Esc clear",
+        ),
+        (
+            "transcript",
+            "y copy the row's text \u{00b7} w save the row's text to a file",
         ),
         ("q", "quit"),
     ];
@@ -473,9 +519,11 @@ fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
             "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Transcript => {
-            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
-        Pane::Compose => "Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
+        Pane::Compose => {
+            "Enter send \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc clear \u{00b7} Tab next"
+        }
     };
     Paragraph::new(Span::from(hints).dark_gray())
         .centered()

@@ -30,6 +30,20 @@ pub enum CardFlow {
     SaveCard,
 }
 
+/// The file-path box in the MAIN window (the compose/transcript
+/// channels): what Enter does with the path. Shares the path input
+/// with the peers card flows — the two are never active together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileBox {
+    None,
+    /// Write the compose text to the file.
+    SaveCompose,
+    /// Replace the compose text with the file's content.
+    LoadCompose,
+    /// Write the selected transcript row's text to the file.
+    SaveTranscript,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Threads,
@@ -71,6 +85,8 @@ pub struct App {
     /// The file-path box's text (for `read card from` / `save card
     /// to`).
     pub file_input: Input,
+    /// The active MAIN-window file-path box.
+    pub file_box: FileBox,
     /// This session's sent rows: (content digest, was mailed) — a
     /// commit mails only when the target set is non-empty. The ordinal
     /// in this vector = the row's chain seq within the session.
@@ -142,6 +158,7 @@ impl App {
             peer_input: Input::default(),
             card_flow: CardFlow::None,
             file_input: Input::default(),
+            file_box: FileBox::None,
             sent: Vec::new(),
             awaiting_commit: false,
             acked: Vec::new(),
@@ -253,6 +270,91 @@ impl App {
             raw.to_owned()
         };
         Some(std::path::PathBuf::from(path))
+    }
+
+    /// The selected transcript row (the yank/write target).
+    fn selected_entry(&self) -> Option<&zconned_stdio_types::Entry> {
+        let i = self.transcript_sel.selected()?;
+        self.entries.get(i)
+    }
+
+    /// The row's TEXT: the content value decoded as UTF-8. `None` =
+    /// the value has not arrived (the row shows `(value missing)`).
+    pub fn entry_text(e: &zconned_stdio_types::Entry) -> Option<String> {
+        Some(String::from_utf8_lossy(&e.content.as_ref()?.value.as_ref()?.data).into_owned())
+    }
+
+    /// Copy the selected transcript row's text to the clipboard.
+    fn transcript_yank(&mut self) {
+        let flash = match self.selected_entry().map(crate::app::App::entry_text) {
+            Some(Some(text)) if !text.is_empty() => clipboard::set(&text)
+                .map(|()| format!("copied {} chars", text.chars().count()))
+                .unwrap_or_else(|reason| format!("{reason} — use w to save a file")),
+            Some(Some(_)) => "the row's text is empty".into(),
+            Some(None) => "value missing — nothing to copy".into(),
+            None => "no row selected".into(),
+        };
+        self.flash = Some(flash);
+    }
+
+    /// The MAIN-window file-path box: Enter acts, Esc cancels.
+    fn on_key_file_box(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent};
+        match key.code {
+            KeyCode::Enter => {
+                let path = self.expanded_path();
+                match (self.file_box, path) {
+                    (_, None) => self.flash = Some("no path given".into()),
+                    (FileBox::SaveCompose, Some(p)) => {
+                        let body = self.input.value().to_owned();
+                        match std::fs::write(&p, format!("{body}\n")) {
+                            Ok(()) => {
+                                self.flash = Some(format!("saved to {}", p.display()));
+                                self.file_input.reset();
+                                self.file_box = FileBox::None;
+                            }
+                            Err(e) => self.flash = Some(format!("save failed: {e}")),
+                        }
+                    }
+                    (FileBox::LoadCompose, Some(p)) => match std::fs::read_to_string(&p) {
+                        Ok(text) => {
+                            self.input.reset();
+                            for c in text.trim_end_matches(['\r', '\n']).chars() {
+                                self.input
+                                    .handle_event(&Event::Key(KeyEvent::from(KeyCode::Char(c))));
+                            }
+                            self.flash = Some("compose loaded from file".into());
+                            self.file_input.reset();
+                            self.file_box = FileBox::None;
+                        }
+                        Err(e) => self.flash = Some(format!("read failed: {e}")),
+                    },
+                    (FileBox::SaveTranscript, Some(p)) => {
+                        let flash = match self.selected_entry().map(crate::app::App::entry_text) {
+                            Some(Some(text)) => match std::fs::write(&p, format!("{text}\n")) {
+                                Ok(()) => {
+                                    self.file_input.reset();
+                                    self.file_box = FileBox::None;
+                                    format!("saved to {}", p.display())
+                                }
+                                Err(e) => format!("save failed: {e}"),
+                            },
+                            Some(None) => "value missing — nothing to save".into(),
+                            None => "no row selected".into(),
+                        };
+                        self.flash = Some(flash);
+                    }
+                    (FileBox::None, _) => {}
+                }
+            }
+            KeyCode::Esc => {
+                self.file_input.reset();
+                self.file_box = FileBox::None;
+            }
+            _ => {
+                self.file_input.handle_event(&Event::Key(key));
+            }
+        }
     }
 
     /// The thread continuation base for a reply: the transcript's
@@ -492,7 +594,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
-        use ratatui::crossterm::event::{Event, KeyCode};
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent};
 
         // Dead-core posture: nothing but the way out.
         if !self.core_alive {
@@ -514,16 +616,57 @@ impl App {
             return;
         }
 
+        if self.file_box != FileBox::None {
+            self.on_key_file_box(key);
+            return;
+        }
+
         if self.show_peers {
             self.on_key_peers(key);
             return;
         }
 
         if self.focus == Pane::Compose {
+            use ratatui::crossterm::event::KeyModifiers;
             match key.code {
                 KeyCode::Tab => self.cycle_focus(),
                 KeyCode::Esc => self.input.reset(),
                 KeyCode::Enter => self.compose_send(),
+                // The compose channels: copy/paste through the
+                // clipboard (may be unavailable), read/write through
+                // a file (always available).
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let text = self.input.value().trim().to_owned();
+                    self.flash = Some(if text.is_empty() {
+                        "nothing to copy".into()
+                    } else {
+                        clipboard::set(&text)
+                            .map(|()| "compose copied to clipboard".to_owned())
+                            .unwrap_or_else(|reason| {
+                                format!("{reason} — use Ctrl-S to save a file")
+                            })
+                    });
+                }
+                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    match clipboard::get() {
+                        Ok(text) => {
+                            for c in text.trim_end_matches(['\r', '\n']).chars() {
+                                self.input
+                                    .handle_event(&Event::Key(KeyEvent::from(KeyCode::Char(c))));
+                            }
+                            self.flash = Some("pasted from clipboard".into());
+                        }
+                        Err(reason) => self.flash = Some(reason),
+                    }
+                }
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.file_input.reset();
+                    self.file_box = FileBox::LoadCompose;
+                }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.file_input.reset();
+                    self.file_box = FileBox::SaveCompose;
+                }
                 _ => {
                     self.input.handle_event(&Event::Key(key));
                 }
@@ -558,6 +701,13 @@ impl App {
                 Pane::Compose => {}
             },
             KeyCode::Char('t') if self.focus == Pane::Threads => self.refresh_threads(),
+            // The transcript text channels: yank to the clipboard,
+            // save to a file (the path box).
+            KeyCode::Char('y') if self.focus == Pane::Transcript => self.transcript_yank(),
+            KeyCode::Char('w') if self.focus == Pane::Transcript => {
+                self.file_input.reset();
+                self.file_box = FileBox::SaveTranscript;
+            }
             KeyCode::Char('r') => self.refresh_draft(),
             // New-thread compose: the next send starts a fresh chain
             // even though a thread transcript is open.

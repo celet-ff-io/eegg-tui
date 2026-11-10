@@ -459,8 +459,11 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     );
     paragraph.render(area, f.buffer_mut());
     if app.focus == Pane::Compose {
-        // The terminal cursor tracks the input caret.
-        f.set_cursor_position((area.x + 2 + caret_col as u16, area.y + 1));
+        // The terminal cursor tracks the input caret: the text starts
+        // two spans in (the border, then the "> " prompt), so the
+        // caret cell is x + 3 + caret — one cell AFTER the last typed
+        // character, never on it.
+        f.set_cursor_position((area.x + 3 + caret_col as u16, area.y + 1));
     }
 }
 

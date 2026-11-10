@@ -64,6 +64,59 @@ pub fn render(app: &mut App, f: &mut Frame) {
     if app.show_log {
         render_log_popup(app, f);
     }
+    if app.show_help {
+        render_help_popup(f);
+    }
+}
+
+/// The lazygit-style help overlay: the full keymap on one card, above
+/// everything (it may sit over the peers/log popups too). Closed with
+/// Esc / ? / q.
+fn render_help_popup(f: &mut Frame) {
+    let rows: [(&str, &str); 17] = [
+        ("t", "refresh threads"),
+        ("n", "new thread (fresh chain on the next send)"),
+        ("Enter", "open selected thread / send the compose text"),
+        ("j / k \u{2191}\u{2193}", "move the selection"),
+        ("g / G", "jump to the top / the bottom"),
+        ("r", "re-stage the draft (transcript pane)"),
+        (
+            "Tab",
+            "next pane (threads \u{2192} transcript \u{2192} compose)",
+        ),
+        ("p", "peers popup"),
+        ("l", "core log popup (the core's stderr ring)"),
+        ("Esc", "clear the input / back / close popups"),
+        ("p \u{00b7} c", "peers: copy my card to the clipboard"),
+        ("p \u{00b7} s", "peers: save my card to a file (~ expands)"),
+        ("p \u{00b7} a", "peers: add the counterpart's card"),
+        ("Ctrl-V", "peers add: paste the card from the clipboard"),
+        ("Ctrl-R", "peers add: load the card from a file"),
+        (
+            "compose",
+            "Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
+        ),
+        ("q", "quit"),
+    ];
+    let height = rows.len() as u16 + 2;
+    let area = centered(f.area(), 64, height);
+    f.render_widget(Clear, area);
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|(key, desc)| {
+            Line::from(vec![
+                Span::from(format!(" {key:<10}")).yellow(),
+                Span::from(desc.to_owned()),
+            ])
+        })
+        .collect();
+    Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(" help \u{00b7} Esc/?/q close ")
+                .border_style(Color::Magenta),
+        )
+        .render(area, f.buffer_mut());
 }
 
 /// The core's stderr ring — the diagnosis window. The core logs
@@ -414,10 +467,10 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match app.focus {
         Pane::Threads => {
-            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} q quit"
+            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Transcript => {
-            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} q quit"
+            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} p peers \u{00b7} l log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Compose => "Enter send \u{00b7} Esc clear \u{00b7} Tab next pane",
     };

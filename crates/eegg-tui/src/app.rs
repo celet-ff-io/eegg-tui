@@ -61,6 +61,9 @@ pub struct App {
     pub peers: Vec<Peer>,
     pub self_card: Option<String>,
     pub show_peers: bool,
+    /// The lazygit-style help overlay (opened with `?`); it eats all
+    /// keys until closed (Esc / ? / q).
+    pub show_help: bool,
     pub peers_sel: ListState,
     pub peer_input: Input,
     /// The active bottom box in the peers popup.
@@ -134,6 +137,7 @@ impl App {
             peers: Vec::new(),
             self_card: None,
             show_peers: false,
+            show_help: false,
             peers_sel: ListState::default(),
             peer_input: Input::default(),
             card_flow: CardFlow::None,
@@ -481,6 +485,7 @@ impl App {
                 self.show_peers = false;
                 return false;
             }
+            (CardFlow::None, KeyCode::Char('?')) => self.show_help = true,
             (CardFlow::None, _) => {}
         }
         true
@@ -493,6 +498,18 @@ impl App {
         if !self.core_alive {
             if matches!(key.code, KeyCode::Char('q')) {
                 self.quit = true;
+            }
+            return;
+        }
+
+        // The help overlay eats every key: only its own close keys
+        // land; the UI underneath stays untouched.
+        if self.show_help {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+            ) {
+                self.show_help = false;
             }
             return;
         }
@@ -515,6 +532,9 @@ impl App {
         }
 
         match key.code {
+            // The help overlay (lazygit-style); the input panes
+            // keep typing a literal '?'.
+            KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab => self.cycle_focus(),
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),

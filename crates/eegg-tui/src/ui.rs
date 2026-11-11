@@ -187,12 +187,12 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (false, "global", ""),
         (
             true,
-            "<Ctrl+hjkl>",
-            "navigate from anywhere: h = region 1 · l = region 2 · j = next · k = previous",
+            "<Ctrl+h/j/k/l>",
+            "navigate from anywhere (h/l the sides, j/k the ring)",
         ),
         (
             true,
-            "h / l",
+            "h/l",
             "the same left/right moves (plain keys — the lists and the composer keep what they use)",
         ),
         (true, "Tab", "cycle focus between the regions"),
@@ -204,22 +204,22 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (
             true,
             "1..4",
-            "switch this region's content (the current one just closes)",
+            "switch this region's content (the current closes)",
         ),
-        (true, "Esc / m", "close, no change"),
+        (true, "Esc/m", "close, no change"),
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
         (true, "Enter", "open the selected thread"),
-        (true, "j / k \u{2191}\u{2193}", "move the selection"),
-        (true, "g / G", "jump to the top / the bottom"),
+        (true, "j/k \u{2191}\u{2193}", "move the selection"),
+        (true, "g/G", "jump to the top / the bottom"),
         (false, "transcript", ""),
         (
             true,
-            "from <anchor>",
-            "the row's author; * = roster-confirmed",
+            "",
+            "from <anchor> = the row's author; * = roster-confirmed",
         ),
-        (true, "j / k \u{2191}\u{2193}", "scroll"),
+        (true, "j/k \u{2191}\u{2193}", "scroll"),
         (true, "PgUp/PgDn", "page by a screen"),
         (true, "n", "new thread (fresh chain on the next send)"),
         (true, "r", "re-stage the draft"),
@@ -236,7 +236,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "<Ctrl+W>", "drop the word before the caret"),
         (
             true,
-            "Home / End",
+            "Home/End",
             "line start / end (<Ctrl+Home>/<Ctrl+End> = the whole draft)",
         ),
         (true, "<Ctrl+U>", "clear the compose text"),
@@ -252,8 +252,8 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (false, "mailboxes", ""),
         (
             true,
-            "+ record",
-            "the card's third key (missing = a legacy card)",
+            "",
+            "+ record = the card's third key (missing = a legacy card)",
         ),
         (
             true,
@@ -264,25 +264,25 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "a", "add the counterpart's card"),
         (true, "<Ctrl+V>", "paste the card from the clipboard"),
         (true, "<Ctrl+R>", "load the card from a file"),
-        (true, "j / k \u{2191}\u{2193}", "move the selection"),
+        (true, "j/k \u{2191}\u{2193}", "move the selection"),
         (true, "Esc", "back a level / cancel the flow"),
         (false, "authors", ""),
         (
             true,
-            "*",
-            "verified authorship (the record signature rostered)",
+            "",
+            "* = verified authorship (the record signature rostered)",
         ),
         (
             true,
-            "\u{00b7}",
-            "observed on an envelope only (unverified)",
+            "",
+            "\u{00b7} = observed on an envelope only (unverified)",
         ),
         (true, "r", "set the selected identity's remark"),
         (true, "R", "clear the selected identity's remark"),
         (false, "log", ""),
         (
             true,
-            "j / k \u{2191}\u{2193}",
+            "j/k \u{2191}\u{2193}",
             "scroll the core's stderr ring",
         ),
         (true, "Esc / L / q", "close the popup"),
@@ -294,14 +294,19 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             // Every section break carries a blank line before it
             // (the first header sits at the top — no blank there).
             let blank = (i > 0 && !row).then(|| Line::from(Span::from("")));
-            let line = if *row {
+            let line = if *row && key.is_empty() {
+                // A legend row: a notation explanation, NOT a
+                // hotkey — flush left, dark gray.
+                Line::from(Span::from(format!("  {desc}")).dark_gray())
+            } else if *row {
                 // lazygit style: the key column right-aligned, the
                 // description tight against it.
-                Line::from(vec![
-                    Span::from(" "),
-                    Span::styled(format!("{key:>12} "), key_style(key)),
-                    Span::from(desc.to_owned()),
-                ])
+                let pad = 12usize.saturating_sub(key.chars().count()) + 1;
+                let mut spans = vec![Span::from(" "), Span::from(" ".repeat(pad - 1))];
+                spans.extend(key_spans(key));
+                spans.push(Span::from(" "));
+                spans.push(Span::from(desc.to_owned()));
+                Line::from(spans)
             } else {
                 // The section break: a full-width rule with the
                 // panel's name in the middle.
@@ -902,10 +907,10 @@ fn keybar_hints(app: &App) -> &'static str {
     }
     match app.regions[app.focus_region()].content {
         ContentKind::Threads => {
-            "<Ctrl+hjkl> navigate · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
-            "<Ctrl+hjkl> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
         }
         ContentKind::Authors => {
             "r remark · R clear remark · c copy card · s save card · j/k move · m wheel · L log · ? help · q quit"
@@ -919,27 +924,80 @@ fn keybar_hints(app: &App) -> &'static str {
 /// One hint segment as styled spans: the KEY stands out (orange,
 /// bold — a distinct hue from the borders' yellow), the description
 /// reads at the plain dark gray.
-/// The key-column style: single keys stand orange+bold; NAMED
-/// multi-key tokens (Esc, Enter, the Ctrl/Alt combos...) add ITALIC
-/// — they are never a single key, and the '+' inside a combo is
-/// italic with the token, never a literal '+' key.
-fn key_style(key: &str) -> Style {
-    const SINGLE: Style = Style::new().fg(Color::Indexed(208)).bold();
+/// A key token as styled spans:
+/// - a single key: orange + bold;
+/// - a combo `<Ctrl+w>`: ONLY the notation prefix `<Ctrl+` is ITALIC
+///   (it is never letters to type — "Esc+" must not read as e+s+c);
+///   the trailing key keeps the single-key style;
+/// - the '/' between keys is a DARK separator (h/j/k/l, Esc/m,
+///   PgUp/PgDn — it is never a key of its own).
+fn key_spans(key: &str) -> Vec<Span<'static>> {
+    const KEY: Style = Style::new().fg(Color::Indexed(208)).bold();
     const NAMED: Style = Style::new().fg(Color::Indexed(208)).bold().italic();
-    let named = key.contains('<')
-        || ["Esc", "Enter", "Home", "End", "Tab", "Pg", "Ctrl", "Alt"]
-            .iter()
-            .any(|w| key.contains(w));
-    if named { NAMED } else { SINGLE }
+    const SEP: Style = Style::new().dark_gray();
+    fn push_body(out: &mut Vec<Span<'static>>, body: &str) {
+        let style = match body {
+            "Esc" | "Enter" | "Home" | "End" | "Tab" | "PgUp" | "PgDn" => NAMED,
+            _ => KEY,
+        };
+        // letters joined by '/' inside a combo (h/j/k/l)
+        for (i, part) in body.split('/').enumerate() {
+            if i > 0 {
+                out.push(Span::styled("/".to_owned(), SEP));
+            }
+            out.push(Span::styled(part.to_owned(), style));
+        }
+    }
+    let mut out: Vec<Span> = Vec::new();
+    let mut rest = key;
+    loop {
+        if rest.is_empty() {
+            break;
+        }
+        if rest.starts_with('<') {
+            let Some(close) = rest.find('>') else {
+                out.push(Span::styled(rest.to_owned(), KEY));
+                break;
+            };
+            let inner = &rest[1..close];
+            match inner.split_once('+') {
+                // the notation prefix through the '+' is italic; the
+                // trailing key is styled on its own
+                Some((pfx, body)) => {
+                    out.push(Span::styled("<".to_owned(), SEP));
+                    out.push(Span::styled(format!("{pfx}+"), NAMED));
+                    push_body(&mut out, body);
+                }
+                None => {
+                    out.push(Span::styled("<".to_owned(), SEP));
+                    push_body(&mut out, inner);
+                }
+            }
+            out.push(Span::styled(">".to_owned(), SEP));
+            rest = &rest[close + 1..];
+        } else {
+            let end = rest.find('/').unwrap_or(rest.len());
+            push_body(&mut out, &rest[..end]);
+            rest = &rest[end..];
+        }
+        if let Some(r) = rest.strip_prefix('/') {
+            out.push(Span::styled("/".to_owned(), SEP));
+            rest = r;
+        }
+    }
+    out
 }
 
 fn hint_spans(seg: &str) -> Vec<Span<'static>> {
     match seg.split_once(' ') {
-        Some((k, d)) => vec![
-            Span::styled(k.to_owned(), key_style(k)),
-            Span::styled(format!(" {d}"), Style::new().dark_gray()),
-        ],
-        None => vec![Span::styled(seg.to_owned(), key_style(seg))],
+        Some((k, d)) => key_spans(k)
+            .into_iter()
+            .chain(std::iter::once(Span::styled(
+                format!(" {d}"),
+                Style::new().dark_gray(),
+            )))
+            .collect(),
+        None => key_spans(seg),
     }
 }
 

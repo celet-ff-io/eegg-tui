@@ -18,8 +18,9 @@ pub enum Evt {
     Key(ratatui::crossterm::event::KeyEvent),
     /// Each draw queries the real size; the variant only wakes the loop.
     Resize,
-    /// A delivery/answer frame from the core (arrives ANYTIME).
-    Frame(OutgoingFrame),
+    /// A delivery/answer frame from the core (arrives ANYTIME;
+    /// boxed — the frame type outgrew the channel-cheap variant).
+    Frame(Box<OutgoingFrame>),
     /// One line of the core's stderr (buffered for the death report).
     CoreStderr(String),
     /// The core's stdout pipe closed: `None` = clean EOF, `Some` = a
@@ -70,7 +71,7 @@ pub fn spawn_reader(stdout: CoreStdout, tx: Sender<Evt>) -> JoinHandle<()> {
             loop {
                 match stdout.read_frame::<OutgoingFrame>("OutgoingFrame") {
                     Ok(Some(frame)) => {
-                        if tx.send(Evt::Frame(frame)).is_err() {
+                        if tx.send(Evt::Frame(Box::new(frame))).is_err() {
                             break;
                         }
                     }

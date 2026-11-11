@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use crate::app::{App, CardFlow, Pane, preview_bytes, short_hex};
+use crate::app::{App, CardFlow, Pane, anchor_of, preview_bytes, short_hex};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -117,7 +117,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 37] = [
+    let rows: [(bool, &str, &str); 38] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -125,6 +125,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "j / k \u{2191}\u{2193}", "move the selection"),
         (true, "g / G", "jump to the top / the bottom"),
         (false, "transcript", ""),
+        (
+            true,
+            "from <anchor>",
+            "the row's author; \u{270d} = roster-confirmed",
+        ),
         (true, "j / k \u{2191}\u{2193}", "scroll"),
         (true, "n", "new thread (fresh chain on the next send)"),
         (true, "r", "re-stage the draft"),
@@ -239,12 +244,13 @@ fn render_log_popup(app: &App, f: &mut Frame) {
 
 /// The peers popup: the core's own card on top (copy source), the
 /// send-target set in the middle, the card/file box at the bottom.
-/// One peers-list row: the fingerprint, the algorithm pair, the
-/// endpoints; `tag` marks the self row.
+/// One peers-list row: the addressing anchor (the signing key's
+/// fingerprint — the same form row authors are shown by), the
+/// algorithm pair, the endpoints; `tag` marks the self row.
 fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
     let mut line = vec![
         Span::from(tag.to_owned()).yellow(),
-        Span::from(short_hex(&p.sign_pub)).cyan(),
+        Span::from(short_hex(&anchor_of(p))).cyan(),
         Span::from(format!(" {} + {}", p.sign_algo, p.dh_algo)).dark_gray(),
     ];
     if !p.endpoints.is_empty() {
@@ -363,7 +369,7 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
                     .collect();
                 let caret = app.file_input.visual_cursor() - scroll;
                 (
-                    " save my card to file (~/ expands): Enter save · Esc back ",
+                    " save the selected card to file (~/ expands): Enter save · Esc back ",
                     prefix,
                     visible,
                     caret as u16,
@@ -463,7 +469,17 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
                 .as_ref()
                 .map(|m| m.digest.clone())
                 .unwrap_or_default();
-            entry_item(e, app.row_received(&digest))
+            // The author observation + the signature conjunction: the
+            // core reports the anchor it saw and the verified roster;
+            // "confirmed from the author" is the display's judgment.
+            let from = e.meta.as_ref().map(|m| m.from.clone()).unwrap_or_default();
+            let confirmed = !from.is_empty()
+                && app
+                    .rosters
+                    .get(&digest)
+                    .is_some_and(|s| s.iter().any(|a| a == &from));
+            let author = (!from.is_empty()).then(|| short_hex(&from));
+            entry_item(e, app.row_received(&digest), author.as_deref(), confirmed)
         })
         .collect();
     let list = List::new(items)
@@ -476,7 +492,12 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
     ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.transcript_sel);
 }
 
-fn entry_item(e: &zconned_stdio_types::Entry, received: Option<bool>) -> ListItem<'static> {
+fn entry_item(
+    e: &zconned_stdio_types::Entry,
+    received: Option<bool>,
+    author: Option<&str>,
+    confirmed: bool,
+) -> ListItem<'static> {
     let ts = e
         .meta
         .as_ref()
@@ -516,6 +537,14 @@ fn entry_item(e: &zconned_stdio_types::Entry, received: Option<bool>) -> ListIte
     ];
     if let Some(m) = marker {
         line.push(m);
+    }
+    // The author's anchor as the core observed it; ✍ = confirmed
+    // from the author (their signature is in the row's roster).
+    if let Some(a) = author {
+        line.push(Span::from(format!(" from {a}")).dark_gray());
+        if confirmed {
+            line.push(Span::from(" \u{270d}").magenta());
+        }
     }
     line.push(Span::from("  "));
     line.push(Span::from(content.unwrap_or_else(|| "(no content)".into())));

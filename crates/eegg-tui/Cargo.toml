@@ -16,6 +16,7 @@ arboard = { version = "3.7.0", default-features = false, features = ["wayland-da
 protobuf-varint-deframer.workspace = true
 zconned-stdio-types.workspace = true
 zconned-material.workspace = true
+zconned-crypto.workspace = true
 ratatui.workspace = true
 prost.workspace = true
 base64.workspace = true

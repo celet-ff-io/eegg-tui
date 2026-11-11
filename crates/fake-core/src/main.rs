@@ -143,6 +143,7 @@ fn toy_peer() -> zconned_stdio_types::Peer {
         dh_algo: "x25519".into(),
         static_dh_pub: random(32),
         sig: random(64),
+        record_sign_pub: None,
         endpoints: Vec::new(),
     }
 }
@@ -243,11 +244,22 @@ impl FakeCore {
     }
 
     fn handle(&mut self, f: IncomingFrame) -> Vec<OutgoingFrame> {
-        use zconned_stdio_types::{MsgCursorSet, MsgDraftClaimsAdd, MsgDraftContentSet};
+        use zconned_stdio_types::{
+            MsgCursorSet, MsgDraftClaimsAdd, MsgDraftContentSet, MsgSignersPush,
+        };
         let Some(m) = f.method else {
             return Vec::new(); // all-default frame: acked, no death
         };
         match m {
+            // The roster channel: this mock signs nothing, so the
+            // full state is always the empty snapshot (the answer
+            // states it).
+            Method::MsgSignersGet(s) => vec![OutgoingFrame {
+                frame: Some(Out::MsgSignersPush(MsgSignersPush {
+                    thread: s.thread,
+                    rosters: vec![],
+                })),
+            }],
             Method::MsgCursorSet(MsgCursorSet { at, fresh }) => {
                 if fresh.is_none() && at.is_empty() {
                     return self.error("cursor_required", "neither at nor fresh set");
@@ -391,6 +403,7 @@ impl FakeCore {
                 ts: Some(self.now_ts()),
                 algo: "sha3-256".into(),
                 digest: resource_digest("application/vnd.zconn.msg", &content_ref.digest).to_vec(),
+                from: Vec::new(),
             }),
             content: Some(zconned_stdio_types::ResolvedSlot {
                 r#ref: Some(content_ref),
@@ -466,6 +479,7 @@ impl FakeCore {
                 // Placeholder recipe — the fake is not the digest
                 // machine; the shape is what matters for the shell.
                 digest: resource_digest("application/vnd.zconn.msg", &content_ref.digest).to_vec(),
+                from: Vec::new(),
             }),
             content: Some(ResolvedSlot {
                 r#ref: Some(content_ref),

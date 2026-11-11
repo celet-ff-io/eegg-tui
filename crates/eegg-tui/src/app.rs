@@ -3,7 +3,7 @@
 //! the truth — deliveries update this model as they arrive; nothing
 //! here re-implements core logic.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use ratatui::widgets::ListState;
 use tui_input::Input;
@@ -11,8 +11,8 @@ use tui_input::backend::crossterm::EventHandler as _;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, Value};
 use zconned_stdio_types::{
     Entry, Error as FrameError, Fresh, IncomingFrame, MsgCursorSet, MsgDraftCommit,
-    MsgDraftContentSet, MsgDraftGet, MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet, PeersGet,
-    SelfGet, incoming_frame::Method, outgoing_frame::Frame as Out,
+    MsgDraftContentSet, MsgDraftGet, MsgSignersGet, MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet,
+    PeersGet, SelfGet, incoming_frame::Method, outgoing_frame::Frame as Out,
 };
 
 use crate::clipboard;
@@ -94,6 +94,11 @@ pub struct App {
     /// in the peers popup (my card or a peer's), resolved at `s`
     /// time — a set refresh between `s` and Enter never repoints it.
     pub save_card: Option<String>,
+    /// The open thread's per-msg signer rosters (msg digest → the
+    /// verified signers' anchors): the signature plane's snapshot —
+    /// the get answer states the FULL state, a live push carries the
+    /// same shape; one wholesale replacement serves both paths.
+    pub rosters: BTreeMap<Vec<u8>, Vec<Vec<u8>>>,
     /// This session's sent rows: (content digest, was mailed) — a
     /// commit mails only when the target set is non-empty. The ordinal
     /// in this vector = the row's chain seq within the session.
@@ -144,13 +149,23 @@ pub(crate) fn card_text(peer: &Peer) -> String {
 
 /// The inverse: a card text decodes back to the record (DISPLAY
 /// only — identity questions always go to the core).
-pub(crate) fn peer_from_card(card: &str) -> Option<Peer> {
+pub fn peer_from_card(card: &str) -> Option<Peer> {
     use base64::Engine as _;
     use prost::Message as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(card.trim())
         .ok()?;
     Peer::decode(bytes.as_slice()).ok()
+}
+
+/// A peer's addressing anchor: the fingerprint of its signing key —
+/// the same derivation the core applies, and the key rosters and
+/// row authors are addressed by.
+pub fn anchor_of(peer: &Peer) -> Vec<u8> {
+    match <[u8; zconned_crypto::DIGEST_LEN]>::try_from(peer.sign_pub.as_slice()) {
+        Ok(sign) => zconned_crypto::Fingerprint::of(&sign).digest().to_vec(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// One counterpart's receipt frontier, as the core stated it.
@@ -197,6 +212,7 @@ impl App {
             file_input: Input::default(),
             file_box: FileBox::None,
             save_card: None,
+            rosters: BTreeMap::new(),
             sent: Vec::new(),
             pending_text: None,
             ts_stamped_at: None,
@@ -284,14 +300,26 @@ impl App {
             .and_then(|i| self.threads.get(i).cloned());
         if let Some(t) = thread {
             self.entries.clear();
+            self.rosters.clear();
             self.transcript_sel.select(Some(0));
             self.open_thread = Some(t.clone());
             self.outbox.push(IncomingFrame {
                 method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
-                    thread: Some(t),
+                    thread: Some(t.clone()),
                 })),
             });
+            self.request_signers();
             self.focus = Pane::Transcript;
+        }
+    }
+
+    /// Ask for the open thread's roster snapshot (a fresh open —
+    /// the core also pushes live landings unprompted).
+    fn request_signers(&mut self) {
+        if let Some(t) = self.open_thread.clone() {
+            self.outbox.push(IncomingFrame {
+                method: Some(Method::MsgSignersGet(MsgSignersGet { thread: Some(t) })),
+            });
         }
     }
 
@@ -933,6 +961,26 @@ impl App {
                 }
             }
             Some(Out::MsgCursorPush(p)) => self.cursor = p.refs,
+            Some(Out::MsgSignersPush(p)) => {
+                // The open thread's roster snapshot, replaced
+                // WHOLESALE: the get answer states the full state
+                // (maybe empty), a live push only fires when a
+                // roster is non-empty — the same shape both ways.
+                // Other threads' snapshots are dropped; the fresh
+                // get on open re-answers in full.
+                let mine = self
+                    .open_thread
+                    .as_ref()
+                    .is_some_and(|t| p.thread.as_ref().is_some_and(|pt| pt.digest == t.digest));
+                if mine {
+                    self.rosters = p
+                        .rosters
+                        .into_iter()
+                        .filter(|r| !r.signers.is_empty())
+                        .map(|r| (r.digest, r.signers))
+                        .collect();
+                }
+            }
             Some(Out::MsgDraftPush(d)) => self.staged = Some((d.content, d.claims)),
             Some(Out::MsgThreadsPush(p)) => {
                 self.threads = p.threads.into_iter().filter_map(|t| t.thread).collect();
@@ -1037,7 +1085,7 @@ impl App {
                 self.on_key(k);
             }
             Evt::Resize => {} // each draw queries the real size
-            Evt::Frame(f) => self.on_frame(f),
+            Evt::Frame(f) => self.on_frame(*f),
             Evt::CoreStderr(line) => {
                 if self.core_stderr.len() >= STDERR_TAIL {
                     self.core_stderr.pop_front();

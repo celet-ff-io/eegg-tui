@@ -19,6 +19,7 @@ use zconned_stdio_types::{
     IncomingFrame, OutgoingFrame, incoming_frame::Method, outgoing_frame::Frame as Out,
 };
 
+use eegg_tui::app::{anchor_of, peer_from_card};
 use eegg_tui::core::{CoreStdout, Process};
 
 /// Build the real binaries from the linked zconn tree and return
@@ -179,7 +180,7 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     });
     b.send(Method::PeerSet(zconned_stdio_types::PeerSet {
         peer: None,
-        card: Some(card_a),
+        card: Some(card_a.clone()),
     }));
     b.wait_for("peer set receipt (b)", Duration::from_secs(10), |f| {
         matches!(f, Out::PeersPush(_))
@@ -209,11 +210,38 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
         matches!(f, Out::MsgAdded(_))
     });
 
-    // The message lands on B (the arrival is msg_added itself).
+    // The signature plane rides along: the core auto-self-signs
+    // every sent row, so the commit is followed by the row's roster
+    // snapshot stating the self anchor.
+    let a_anchor = anchor_of(&peer_from_card(&card_a).expect("a's card decodes"));
+    a.wait_for("the self-roster push (a)", Duration::from_secs(10), |f| {
+        matches!(f, Out::MsgSignersPush(_))
+    });
+    println!("e2e: self-roster snapshot pushed on a");
+
+    // The message lands on B (the arrival is msg_added itself),
+    // and A's signature mail lands beside it — B's roster snapshot
+    // for that digest states A's anchor: the full conjunction the
+    // display builds on (author + roster).
     b.wait_for("the arrival on b", Duration::from_secs(30), |f| {
         matches!(f, Out::MsgAdded(_))
     });
     println!("e2e: arrival landed on b");
+    let sig = b.wait_for("the roster snapshot on b", Duration::from_secs(30), |f| {
+        matches!(f, Out::MsgSignersPush(_))
+    });
+    match sig {
+        Out::MsgSignersPush(p) => {
+            assert!(
+                p.rosters
+                    .iter()
+                    .any(|r| r.signers.iter().any(|s| s == &a_anchor)),
+                "b's roster must state a's anchor",
+            );
+            println!("e2e: b's roster states a's anchor");
+        }
+        _ => unreachable!(),
+    }
 
     // The receipt frontier comes back to A (ack = received, never
     // read). Zero-frontier statements exist (the counterpart's

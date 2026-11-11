@@ -39,6 +39,7 @@ rust-version = "1.98"
 protobuf-varint-deframer = { path = "local-deps/zconn/crates/protobuf-varint-deframer" }
 zconned-stdio-types = { path = "local-deps/zconn/crates/zconned-stdio-types" }
 zconned-material = { path = "local-deps/zconn/crates/zconned-material" }
+zconned-crypto = { path = "local-deps/zconn/crates/zconned-crypto" }
 
 # --- wire + link glue ---
 prost = "0.14.4"

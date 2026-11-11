@@ -117,7 +117,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 43] = [
+    let rows: [(bool, &str, &str); 45] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -172,6 +172,8 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "\u{00b7}",
             "observed on an envelope only (unverified)",
         ),
+        (true, "r", "set the selected identity's remark"),
+        (true, "R", "clear the selected identity's remark"),
         (false, "global", ""),
         (
             true,
@@ -411,6 +413,7 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
                 )
             }
             CardFlow::None => unreachable!("checked above"),
+            CardFlow::InputRemark => unreachable!("the authors tab renders its own remark box"),
         };
         Paragraph::new(Line::from(vec![
             Span::from(prefix).yellow(),
@@ -507,13 +510,20 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
             // The author observation + the signature conjunction: the
             // core reports the anchor it saw and the verified roster;
             // "confirmed from the author" is the display's judgment.
+            // The author's remark (the package's local overlay) is
+            // shown INSTEAD of the key fingerprint when stated.
             let from = e.meta.as_ref().map(|m| m.from.clone()).unwrap_or_default();
+            let overlay = app.locals.get(&digest);
             let confirmed = !from.is_empty()
-                && app
-                    .rosters
-                    .get(&digest)
-                    .is_some_and(|s| s.iter().any(|a| a == &from));
-            let author = (!from.is_empty()).then(|| short_hex(&from));
+                && overlay.is_some_and(|o| o.signers.iter().any(|a| a == &from));
+            let fallback = short_hex(&from);
+            let author = (!from.is_empty()).then(|| {
+                overlay
+                    .and_then(|o| o.author_remark.as_deref())
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or(fallback.as_str())
+                    .to_owned()
+            });
             entry_item(e, app.row_received(&digest), author.as_deref(), confirmed)
         })
         .collect();
@@ -573,8 +583,9 @@ fn entry_item(
     if let Some(m) = marker {
         line.push(m);
     }
-    // The author's anchor as the core observed it; ✍ = confirmed
-    // from the author (their signature is in the row's roster).
+    // The author's anchor as the core observed it (or the author's
+    // local remark in its place); ✍ = confirmed from the author
+    // (their signature is in the row's roster).
     if let Some(a) = author {
         line.push(Span::from(format!(" from {a}")).dark_gray());
         if confirmed {
@@ -597,25 +608,44 @@ fn entry_item(
 /// The AUTHORS tab of the profile popup: every sender identity the
 /// session observed — ✍ = its record signature was rostered
 /// (objective authorship, verified by the core); · = seen on an
-/// envelope only. Each anchor cross-referenced with the book.
+/// envelope only. Each row shows the identity's local remark (the
+/// key fingerprint only as the fallback), cross-referenced with
+/// the book.
 fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
+    // The remark input box shares the popup's bottom-edge pattern
+    // with the mailbox tab's card flows.
+    let [list, input] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(if app.card_flow == CardFlow::InputRemark {
+            3
+        } else {
+            0
+        }),
+    ])
+    .areas(area);
     let items: Vec<ListItem> = app
         .authors
         .iter()
-        .map(|(a, verified)| {
+        .map(|(a, entry)| {
             let in_book = app.peers.iter().any(|p| &anchor_of(p) == a);
+            let fallback = short_hex(a);
+            let shown = entry
+                .remark
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .unwrap_or(fallback.as_str());
             let mut line = vec![
-                Span::from(if *verified {
+                Span::from(if entry.verified {
                     " \u{270d} "
                 } else {
                     " \u{00b7} "
                 })
-                .style(if *verified {
+                .style(if entry.verified {
                     Style::default().fg(Color::Magenta)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 }),
-                Span::from(short_hex(a)).cyan(),
+                Span::from(shown.to_owned()).cyan(),
                 Span::from(if in_book {
                     "  = book"
                 } else {
@@ -623,7 +653,7 @@ fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect
                 })
                 .dark_gray(),
             ];
-            if *verified && !in_book {
+            if entry.verified && !in_book {
                 // Theoretically unreachable (verification rides a
                 // mailbox's card) — belt and braces for a drift.
                 line[2] = Span::from("  ?? verified w/o card").red();
@@ -631,7 +661,7 @@ fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect
             ListItem::from(Line::from(line))
         })
         .collect();
-    let list = List::new(items)
+    let list_w = List::new(items)
         .block(
             Block::bordered()
                 .title(format!(
@@ -641,7 +671,29 @@ fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect
                 .border_style(Color::Yellow),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.authors_sel);
+    ratatui::widgets::StatefulWidget::render(&list_w, list, f.buffer_mut(), &mut app.authors_sel);
+    if app.card_flow == CardFlow::InputRemark {
+        let prefix = "remark> ";
+        let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+        let scroll = app.remark_input.visual_scroll(text_width);
+        let visible: String = app
+            .remark_input
+            .value()
+            .chars()
+            .skip(scroll)
+            .take(text_width)
+            .collect();
+        let caret = app.remark_input.visual_cursor() - scroll;
+        Paragraph::new(Line::from(vec![
+            Span::from(prefix).yellow(),
+            Span::from(visible),
+        ]))
+        .block(Block::bordered().title(
+            " set the selected identity's remark: Enter set · Ctrl-V paste · Esc cancel ",
+        ))
+        .render(input, f.buffer_mut());
+        f.set_cursor_position((input.x + 1 + prefix.len() as u16 + caret as u16, input.y + 1));
+    }
 }
 
 fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {

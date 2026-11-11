@@ -10,9 +10,10 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, Value};
 use zconned_stdio_types::{
-    Entry, Error as FrameError, Fresh, IncomingFrame, MsgCursorSet, MsgDraftCommit,
-    MsgDraftContentSet, MsgDraftGet, MsgSignersGet, MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet,
-    PeersGet, SelfGet, incoming_frame::Method, outgoing_frame::Frame as Out,
+    Entry, Error as FrameError, Fresh, IdentitiesGet, IdentityRemarkReset, IdentityRemarkSet,
+    IncomingFrame, MsgCursorSet, MsgDraftCommit, MsgDraftContentSet, MsgDraftGet, MsgPackage,
+    MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet, PeersGet, SelfGet, incoming_frame::Method,
+    outgoing_frame::Frame as Out,
 };
 
 use crate::clipboard;
@@ -20,14 +21,15 @@ use crate::core::Process;
 use crate::events::Evt;
 
 /// Which bottom box the peers popup shows: the pasted-card input,
-/// the read-card-from-file path box, or the save-card-to-file path
-/// box. `None` = the plain list.
+/// the read-card-from-file path box, the save-card-to-file path
+/// box, or the authors tab's remark input. `None` = the plain list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardFlow {
     None,
     InputCard,
     ReadCard,
     SaveCard,
+    InputRemark,
 }
 
 /// The file-path box in the MAIN window (the compose/transcript
@@ -106,21 +108,27 @@ pub struct App {
     /// in the peers popup (my card or a peer's), resolved at `s`
     /// time — a set refresh between `s` and Enter never repoints it.
     pub save_card: Option<String>,
-    /// The open thread's per-msg signer rosters (msg digest → the
-    /// verified signers' anchors): the signature plane's snapshot —
-    /// the get answer states the FULL state, a live push carries the
-    /// same shape; one wholesale replacement serves both paths.
-    pub rosters: BTreeMap<Vec<u8>, Vec<Vec<u8>>>,
+    /// The open transcript's per-row overlay facts (msg digest →
+    /// the verified signer anchors + the author's remark): rebuilt
+    /// wholesale by a log answer, patched by package re-pushes.
+    pub locals: BTreeMap<Vec<u8>, Overlay>,
     /// The AUTHOR registry: every sender identity observed this
-    /// session, whether its record signature was ever rostered
-    /// (verified — signatures never retract, the upgrade is
-    /// one-way). The authors domain of the profile popup; separate
-    /// from the mailbox book even though both index by the anchor.
-    pub authors: BTreeMap<Vec<u8>, bool>,
+    /// session — observed on an envelope until a roster mention
+    /// proves authorship (verified; signatures never retract, the
+    /// upgrade is one-way), plus the last stated remark. The authors
+    /// domain of the profile popup; separate from the mailbox book
+    /// even though both index by the anchor.
+    pub authors: BTreeMap<Vec<u8>, AuthorEntry>,
     /// The profile popup's active domain.
     pub profile_tab: ProfileTab,
     /// The authors tab's selection.
     pub authors_sel: ListState,
+    /// The remark input (the AUTHORS tab's bottom box).
+    pub remark_input: Input,
+    /// Set between a remark mutation request and its IdentitiesPush
+    /// receipt: the receipt then also re-fetches the displayed
+    /// thread's log (delivered packages are never echoed).
+    pub awaiting_remark_receipt: bool,
     /// This session's sent rows: (content digest, was mailed) — a
     /// commit mails only when the target set is non-empty. The ordinal
     /// in this vector = the row's chain seq within the session.
@@ -204,6 +212,23 @@ pub struct Acked {
     up_to: u64,
 }
 
+/// The AUTHOR registry's row: whether a roster ever proved the
+/// identity's authorship (one-way), and the last stated local remark.
+#[derive(Debug, Default, Clone)]
+pub struct AuthorEntry {
+    pub verified: bool,
+    pub remark: Option<String>,
+}
+
+/// A row's overlay facts: the verified signer anchors + the author's
+/// local remark (the delivery package's Local group, reshaped for
+/// the display).
+#[derive(Debug, Default, Clone)]
+pub struct Overlay {
+    pub signers: Vec<Vec<u8>>,
+    pub author_remark: Option<String>,
+}
+
 impl Default for App {
     fn default() -> Self {
         Self::new()
@@ -234,10 +259,12 @@ impl App {
             file_input: Input::default(),
             file_box: FileBox::None,
             save_card: None,
-            rosters: BTreeMap::new(),
+            locals: BTreeMap::new(),
             authors: BTreeMap::new(),
             profile_tab: ProfileTab::default(),
             authors_sel: ListState::default(),
+            remark_input: Input::default(),
+            awaiting_remark_receipt: false,
             sent: Vec::new(),
             pending_text: None,
             ts_stamped_at: None,
@@ -292,6 +319,14 @@ impl App {
         });
     }
 
+    /// The AUTHOR registry's wholesale get: the answer (or a remark
+    /// set/reset receipt) arrives as an IdentitiesPush.
+    fn refresh_identities(&mut self) {
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::IdentitiesGet(IdentitiesGet {})),
+        });
+    }
+
     fn cycle_focus(&mut self) {
         self.focus = match self.focus {
             Pane::Threads => Pane::Transcript,
@@ -325,7 +360,7 @@ impl App {
             .and_then(|i| self.threads.get(i).cloned());
         if let Some(t) = thread {
             self.entries.clear();
-            self.rosters.clear();
+            self.locals.clear();
             self.transcript_sel.select(Some(0));
             self.open_thread = Some(t.clone());
             self.outbox.push(IncomingFrame {
@@ -333,27 +368,8 @@ impl App {
                     thread: Some(t.clone()),
                 })),
             });
-            self.request_signers();
             self.focus = Pane::Transcript;
         }
-    }
-
-    /// Ask for the open thread's roster snapshot (a fresh open —
-    /// the core also pushes live landings unprompted).
-    fn request_signers(&mut self) {
-        if let Some(t) = self.open_thread.clone() {
-            self.ask_signers(t);
-        }
-    }
-
-    /// Ask for one thread's roster snapshot (a fresh open — the core
-    /// also pushes live landings unprompted).
-    fn ask_signers(&mut self, thread: MsgRef) {
-        self.outbox.push(IncomingFrame {
-            method: Some(Method::MsgSignersGet(MsgSignersGet {
-                thread: Some(thread),
-            })),
-        });
     }
 
     /// The selected author's anchor (BTreeMap order = anchor order).
@@ -726,6 +742,71 @@ impl App {
             (CardFlow::ReadCard | CardFlow::SaveCard, _) => {
                 self.file_input.handle_event(&Event::Key(key));
             }
+            // The remark edit: an AUTHORS-tab action on the selected
+            // identity (the registry is the remark's authority).
+            (CardFlow::None, KeyCode::Char('r')) if self.profile_tab == ProfileTab::Authors => {
+                self.remark_input.reset();
+                self.card_flow = CardFlow::InputRemark;
+            }
+            // Clear the selected identity's remark (the registry's
+            // reset verb; the receipt is an IdentitiesPush).
+            (CardFlow::None, KeyCode::Char('R')) if self.profile_tab == ProfileTab::Authors => {
+                match self.selected_author() {
+                    Some(anchor) => {
+                        self.outbox.push(IncomingFrame {
+                            method: Some(Method::IdentityRemarkReset(IdentityRemarkReset {
+                                anchor,
+                            })),
+                        });
+                        self.awaiting_remark_receipt = true;
+                    }
+                    None => self.flash = Some("no identity selected".into()),
+                }
+            }
+            // The remark input: Enter submits (the core answers
+            // remark_required on an empty remark — pre-checked here),
+            // Ctrl-V pastes, Esc cancels back to the list.
+            (CardFlow::InputRemark, KeyCode::Enter) => {
+                let text = self.remark_input.value().trim().to_owned();
+                match (self.selected_author(), text.is_empty()) {
+                    (Some(anchor), false) => {
+                        self.outbox.push(IncomingFrame {
+                            method: Some(Method::IdentityRemarkSet(IdentityRemarkSet {
+                                anchor,
+                                remark: text,
+                            })),
+                        });
+                        self.awaiting_remark_receipt = true;
+                        self.remark_input.reset();
+                        self.card_flow = CardFlow::None;
+                    }
+                    (Some(_), true) => self.flash = Some("remark required".into()),
+                    (None, _) => {
+                        self.flash = Some("no identity selected".into());
+                        self.card_flow = CardFlow::None;
+                    }
+                }
+            }
+            (CardFlow::InputRemark, KeyCode::Char('v'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                match clipboard::get() {
+                    Ok(text) => {
+                        for c in text.trim().chars() {
+                            self.remark_input
+                                .handle_event(&Event::Key(KeyEvent::from(KeyCode::Char(c))));
+                        }
+                    }
+                    Err(reason) => self.flash = Some(reason),
+                }
+            }
+            (CardFlow::InputRemark, KeyCode::Esc) => {
+                self.remark_input.reset();
+                self.card_flow = CardFlow::None;
+            }
+            (CardFlow::InputRemark, _) => {
+                self.remark_input.handle_event(&Event::Key(key));
+            }
             // Listing posture.
             // Adding a card is a MAILBOX-domain action.
             (CardFlow::None, KeyCode::Char('a')) if self.profile_tab == ProfileTab::Mailbox => {
@@ -739,7 +820,11 @@ impl App {
                     ProfileTab::Authors => ProfileTab::Mailbox,
                 };
                 match self.profile_tab {
-                    ProfileTab::Authors => self.authors_sel.select(Some(0)),
+                    ProfileTab::Authors => {
+                        self.authors_sel.select(Some(0));
+                        // A fresh wholesale get per open of the tab.
+                        self.refresh_identities();
+                    }
                     ProfileTab::Mailbox => self.peers_sel.select(Some(0)),
                 }
             }
@@ -972,12 +1057,11 @@ impl App {
                 self.peers_sel.select(Some(0));
                 self.refresh_peers();
                 self.refresh_self();
-                // The author registry spans ALL threads: one roster
-                // get per thread (bounded, day-one) — the answers
-                // feed the registry even for threads never opened.
-                for t in self.threads.clone() {
-                    self.ask_signers(t);
-                }
+                // The AUTHOR registry: a wholesale re-get per open —
+                // the registry is the remark's authority, and the
+                // anchor set it states covers every observed
+                // identity.
+                self.refresh_identities();
             }
             KeyCode::Enter if self.focus == Pane::Threads => self.open_selected_thread(),
             _ => {}
@@ -988,102 +1072,15 @@ impl App {
     /// renders what the core reports.
     fn on_frame(&mut self, f: zconned_stdio_types::OutgoingFrame) {
         match f.frame {
-            Some(Out::MsgAdded(a)) => {
-                if let Some(e) = a.entry {
-                    // Commit receipts and network arrivals share this
-                    // one statement; the awaiting flag tells them apart
-                    // (set by the commit request; a rare arrival racing
-                    // in between is misattributed — a day-one residual).
-                    // The author registry: the envelope anchor is an
-                    // OBSERVATION until the row's roster states it
-                    // (verified is a one-way upgrade).
-                    if let Some(m) = e.meta.as_ref()
-                        && !m.from.is_empty()
-                    {
-                        self.authors.entry(m.from.clone()).or_insert(false);
-                    }
-                    let digest = e.meta.as_ref().map(|m| m.digest.clone());
-                    if self.awaiting_commit {
-                        self.awaiting_commit = false;
-                        if let Some(d) = digest.clone() {
-                            self.sent.push((d, !self.peers.is_empty()));
-                        }
-                    }
-                    // Dedup by digest guards against a re-announced
-                    // row (a refetch, a replay). Routing: a row
-                    // continuing the OPEN thread (its prev addresses
-                    // the transcript's tip) appends live; anything
-                    // else only refreshes the thread list.
-                    let unseen = digest.as_ref().is_none_or(|d| {
-                        !self
-                            .entries
-                            .iter()
-                            .any(|x| x.meta.as_ref().is_some_and(|m| m.digest == *d))
-                    });
-                    if unseen {
-                        let continues = self
-                            .open_thread_tip()
-                            .map(|tip| e.prev.iter().any(|r| r.digest == tip.digest))
-                            .unwrap_or(false);
-                        if continues {
-                            self.entries.push(e);
-                            let n = self.entries.len();
-                            self.transcript_sel.select(Some(n - 1));
-                        } else if self.open_thread.is_none() {
-                            // Nothing open: show the row and adopt its
-                            // thread (a fresh commit's first prev IS
-                            // the thread id — the genesis parent ref).
-                            self.entries = vec![e.clone()];
-                            self.open_thread = e.prev.first().cloned();
-                            self.transcript_sel.select(Some(0));
-                        }
-                        self.refresh_threads();
-                        self.flash = Some("msg arrived".into());
-                    }
-                    // A stamp receipt releases the queued text: the
-                    // tip now includes the stamp row, so the text's
-                    // position intent addresses it (its chain
-                    // parent).
-                    if let Some(text) = self.pending_text.take() {
-                        self.send_text(text);
-                    }
+            // The ONE delivery unit: a network arrival, the own commit
+            // receipt, and a roster-driven re-push all speak this
+            // frame; the interface never branches on the provenance.
+            Some(Out::MsgPackagePush(p)) => {
+                if let Some(pkg) = p.package {
+                    self.ingest_package(pkg);
                 }
             }
             Some(Out::MsgCursorPush(p)) => self.cursor = p.refs,
-            Some(Out::MsgSignersPush(p)) => {
-                // The AUTHOR registry harvests FIRST (any thread's
-                // roster proves authorship; a rostered signer is
-                // verified — signatures never retract). The open
-                // thread's snapshot is then replaced WHOLESALE: the
-                // get answer states the full state (maybe empty), a
-                // live push only fires when a roster is non-empty —
-                // the same shape both ways. Other threads'
-                // snapshots are dropped; the fresh get on open
-                // re-answers in full.
-                for r in &p.rosters {
-                    for s in &r.signers {
-                        self.authors.insert(s.clone(), true);
-                    }
-                }
-                // The open thread's roster snapshot, replaced
-                // WHOLESALE: the get answer states the full state
-                // (maybe empty), a live push only fires when a
-                // roster is non-empty — the same shape both ways.
-                // Other threads' snapshots are dropped; the fresh
-                // get on open re-answers in full.
-                let mine = self
-                    .open_thread
-                    .as_ref()
-                    .is_some_and(|t| p.thread.as_ref().is_some_and(|pt| pt.digest == t.digest));
-                if mine {
-                    self.rosters = p
-                        .rosters
-                        .into_iter()
-                        .filter(|r| !r.signers.is_empty())
-                        .map(|r| (r.digest, r.signers))
-                        .collect();
-                }
-            }
             Some(Out::MsgDraftPush(d)) => self.staged = Some((d.content, d.claims)),
             Some(Out::MsgThreadsPush(p)) => {
                 self.threads = p.threads.into_iter().filter_map(|t| t.thread).collect();
@@ -1095,7 +1092,33 @@ impl App {
                 self.thread_sel.select(sel.filter(|_| n > 0));
             }
             Some(Out::MsgThreadsLogPush(p)) => {
-                self.entries = p.entries;
+                // The log answer: one package per message, transcript
+                // order. The rows AND their overlays are replaced
+                // WHOLESALE (the answer states the full thread state);
+                // every package feeds the AUTHOR registry.
+                self.entries = Vec::with_capacity(p.packages.len());
+                self.locals = p
+                    .packages
+                    .into_iter()
+                    .filter_map(|pkg| {
+                        let entry = pkg.entry?;
+                        let overlay = pkg.local.unwrap_or_default();
+                        let digest = entry.meta.as_ref()?.digest.clone();
+                        let from = entry.meta.as_ref().map(|m| m.from.clone()).unwrap_or_default();
+                        self.harvest_author(&from, false);
+                        for s in &overlay.signer {
+                            self.harvest_author(&s.anchor, true);
+                        }
+                        self.entries.push(entry);
+                        Some((
+                            digest,
+                            Overlay {
+                                signers: overlay.signer.iter().map(|s| s.anchor.clone()).collect(),
+                                author_remark: overlay.remark,
+                            },
+                        ))
+                    })
+                    .collect();
                 let n = self.entries.len();
                 let sel = self
                     .transcript_sel
@@ -1159,6 +1182,27 @@ impl App {
                     }
                 }
             }
+            // The registry's wholesale answer AND the remark
+            // set/reset receipt (dual-role): the remark is the
+            // registry's fact — overwritten both ways; the verified
+            // flag stays a package-side fact. No echo: delivered
+            // packages keep their compose-time remarks — after a
+            // mutation, the displayed thread's log is re-fetched.
+            Some(Out::IdentitiesPush(p)) => {
+                for i in &p.identities {
+                    self.authors.entry(i.anchor.clone()).or_default().remark = i.remark.clone();
+                }
+                if self.awaiting_remark_receipt {
+                    self.awaiting_remark_receipt = false;
+                    if let Some(t) = self.open_thread.clone() {
+                        self.outbox.push(IncomingFrame {
+                            method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
+                                thread: Some(t),
+                            })),
+                        });
+                    }
+                }
+            }
             Some(Out::Error(e)) => {
                 // The known all-default decode: the core received a
                 // verb it does not know — a stale core build.
@@ -1172,6 +1216,114 @@ impl App {
                 self.flash = None;
             }
             None => {} // all-default frame: acked, no death
+        }
+    }
+
+    /// The one ingest path for the msg domain: every package (a live
+    /// push, the own commit receipt, or a log-answer row) upserts by
+    /// the entry's digest. The frame's provenance is never branched
+    /// on — the interface derives newness (first sight of the
+    /// digest) and own-ness (the awaiting-commit flag) locally.
+    fn ingest_package(&mut self, pkg: MsgPackage) {
+        let Some(e) = pkg.entry else { return };
+        let overlay = pkg.local.unwrap_or_default();
+        let digest = e.meta.as_ref().map(|m| m.digest.clone());
+        let from = e
+            .meta
+            .as_ref()
+            .map(|m| m.from.clone())
+            .unwrap_or_default();
+
+        // The AUTHOR registry: the envelope anchor is an OBSERVATION
+        // until a roster mention states it (verified is a one-way
+        // upgrade). The remark is NOT harvested here — the registry
+        // (the IdentitiesPush face) is its only authority; the
+        // package's remark serves the row display only.
+        self.harvest_author(&from, false);
+        for s in &overlay.signer {
+            self.harvest_author(&s.anchor, true);
+        }
+        // The row's overlay store (the verified signer anchors + the
+        // author's remark), keyed by the digest.
+        if let Some(d) = digest.clone() {
+            self.locals.insert(
+                d,
+                Overlay {
+                    signers: overlay.signer.iter().map(|s| s.anchor.clone()).collect(),
+                    author_remark: overlay.remark,
+                },
+            );
+        }
+
+        // The commit receipt vs an arrival: the awaiting flag (set by
+        // the commit request) tells them apart — a rare arrival racing
+        // in between is misattributed (a day-one residual).
+        let receipt = self.awaiting_commit;
+        if receipt {
+            self.awaiting_commit = false;
+            if let Some(d) = digest.clone() {
+                self.sent.push((d, !self.peers.is_empty()));
+            }
+        }
+
+        // Upsert by digest: a first sight routes (append live /
+        // adopt the thread), a re-push replaces the held row in
+        // place (its roster may have grown).
+        let unseen = digest.as_ref().is_none_or(|d| {
+            !self
+                .entries
+                .iter()
+                .any(|x| x.meta.as_ref().is_some_and(|m| m.digest == *d))
+        });
+        if unseen {
+            let continues = self
+                .open_thread_tip()
+                .map(|tip| e.prev.iter().any(|r| r.digest == tip.digest))
+                .unwrap_or(false);
+            if continues {
+                self.entries.push(e);
+                let n = self.entries.len();
+                self.transcript_sel.select(Some(n - 1));
+            } else if self.open_thread.is_none() {
+                // Nothing open: show the row and adopt its thread (a
+                // fresh commit's first prev IS the thread id — the
+                // genesis parent ref).
+                self.entries = vec![e.clone()];
+                self.open_thread = e.prev.first().cloned();
+                self.transcript_sel.select(Some(0));
+            }
+            self.refresh_threads();
+            self.flash = Some("msg arrived".into());
+        } else if let Some(d) = digest
+            && let Some(slot) = self
+                .entries
+                .iter_mut()
+                .find(|x| x.meta.as_ref().is_some_and(|m| m.digest == d))
+        {
+            *slot = e;
+        }
+
+        // A stamp receipt releases the queued text: the tip now
+        // includes the stamp row, so the text's position intent
+        // addresses it (its chain parent). Only the receipt frame
+        // releases — a roster re-push racing in between must not
+        // fire the text early.
+        if receipt && let Some(text) = self.pending_text.take() {
+            self.send_text(text);
+        }
+    }
+
+    /// One identity observation into the AUTHOR registry. A roster
+    /// mention proves verified authorship (signatures never retract —
+    /// the upgrade is one-way). The remark never rides this path:
+    /// the registry is its only authority.
+    fn harvest_author(&mut self, anchor: &[u8], verified: bool) {
+        if anchor.is_empty() {
+            return;
+        }
+        let entry = self.authors.entry(anchor.to_vec()).or_default();
+        if verified {
+            entry.verified = true;
         }
     }
 

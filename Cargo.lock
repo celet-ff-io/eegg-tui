@@ -809,6 +809,7 @@ dependencies = [
  "prost-types",
  "protobuf-varint-deframer",
  "thiserror 2.0.21",
+ "zconned-crypto",
  "zconned-material",
  "zconned-stdio-types",
 ]

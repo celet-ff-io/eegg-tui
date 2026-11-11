@@ -25,9 +25,11 @@ use prost::Message;
 use protobuf_varint_deframer::Deframer;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, ResourceRef, Value, resource_digest};
 use zconned_stdio_types::{
-    Handshake, IncomingFrame, OutgoingFrame, PROTOCOL_VERSION, incoming_frame::Method,
+    Handshake, IdentitiesGet, IdentitiesPush, Identity, IdentityRemarkReset, IdentityRemarkSet,
+    IncomingFrame, Local, MsgPackage, OutgoingFrame, PROTOCOL_VERSION, incoming_frame::Method,
     outgoing_frame::Frame as Out,
 };
+use zconned_crypto::Fingerprint;
 
 static STYLES: Styles = Styles::styled()
     .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
@@ -107,10 +109,20 @@ fn write_frame<T: Message>(mut stream: impl std::io::Write, frame: &T) -> Result
     stream.flush().map_err(Into::into)
 }
 
+/// The addressing anchor: the fingerprint of the record's signing
+/// key — the same derivation the real core applies (the shell
+/// mirrors it too; the roster and row authors are addressed by it).
+fn anchor_of(peer: &zconned_stdio_types::Peer) -> Vec<u8> {
+    match <[u8; zconned_crypto::DIGEST_LEN]>::try_from(peer.sign_pub.as_slice()) {
+        Ok(sign) => Fingerprint::of(&sign).digest().to_vec(),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[derive(Debug)]
 struct Thread {
     id: MsgRef,
-    log: Vec<zconned_stdio_types::Entry>,
+    log: Vec<MsgPackage>,
 }
 
 #[derive(Debug)]
@@ -124,6 +136,9 @@ struct FakeCore {
     content: Option<Value>,
     claims: Vec<Value>,
     resources: HashMap<Vec<u8>, Value>,
+    /// The toy identity registry: every anchor the toy has delivered
+    /// (authors and rostered signers), with its local remark.
+    identities: HashMap<Vec<u8>, Option<String>>,
     entropy: u64,
 }
 
@@ -171,6 +186,7 @@ impl FakeCore {
             content: None,
             claims: Vec::new(),
             resources: HashMap::new(),
+            identities: HashMap::new(),
             entropy: 0,
         }
     }
@@ -243,23 +259,55 @@ impl FakeCore {
         }]
     }
 
+    /// Every identity the toy delivered joins the registry (the
+    /// derived anchor set: authors and rostered signers alike).
+    fn observe_identity(&mut self, anchor: &[u8]) {
+        if !anchor.is_empty() {
+            self.identities.entry(anchor.to_vec()).or_insert(None);
+        }
+    }
+
+    fn identities_push(&self) -> Vec<OutgoingFrame> {
+        vec![OutgoingFrame {
+            frame: Some(Out::IdentitiesPush(IdentitiesPush {
+                identities: self
+                    .identities
+                    .iter()
+                    .map(|(a, r)| Identity {
+                        anchor: a.clone(),
+                        remark: r.clone(),
+                    })
+                    .collect(),
+            })),
+        }]
+    }
+
     fn handle(&mut self, f: IncomingFrame) -> Vec<OutgoingFrame> {
-        use zconned_stdio_types::{
-            MsgCursorSet, MsgDraftClaimsAdd, MsgDraftContentSet, MsgSignersPush,
-        };
+        use zconned_stdio_types::{MsgCursorSet, MsgDraftClaimsAdd, MsgDraftContentSet};
         let Some(m) = f.method else {
             return Vec::new(); // all-default frame: acked, no death
         };
         match m {
-            // The roster channel: this mock signs nothing, so the
-            // full state is always the empty snapshot (the answer
-            // states it).
-            Method::MsgSignersGet(s) => vec![OutgoingFrame {
-                frame: Some(Out::MsgSignersPush(MsgSignersPush {
-                    thread: s.thread,
-                    rosters: vec![],
-                })),
-            }],
+            // The registry: the wholesale answer; the remark verbs
+            // answer with the fresh registry (the dual-role receipt).
+            Method::IdentitiesGet(IdentitiesGet {}) => self.identities_push(),
+            Method::IdentityRemarkSet(IdentityRemarkSet { anchor, remark }) => {
+                if !self.identities.contains_key(&anchor) {
+                    return self.error("unknown_author", "the anchor is not observed");
+                }
+                if remark.is_empty() {
+                    return self.error("remark_required", "the remark must be non-empty");
+                }
+                self.identities.insert(anchor, Some(remark));
+                self.identities_push()
+            }
+            Method::IdentityRemarkReset(IdentityRemarkReset { anchor }) => {
+                if !self.identities.contains_key(&anchor) {
+                    return self.error("unknown_author", "the anchor is not observed");
+                }
+                self.identities.insert(anchor, None);
+                self.identities_push()
+            }
             Method::MsgCursorSet(MsgCursorSet { at, fresh }) => {
                 if fresh.is_none() && at.is_empty() {
                     return self.error("cursor_required", "neither at nor fresh set");
@@ -327,7 +375,7 @@ impl FakeCore {
                 })),
             }],
             Method::MsgThreadsLogGet(s) => {
-                let entries = self
+                let packages = self
                     .threads
                     .iter()
                     .find(|t| Some(&t.id) == s.thread.as_ref())
@@ -335,7 +383,7 @@ impl FakeCore {
                     .unwrap_or_default();
                 vec![OutgoingFrame {
                     frame: Some(Out::MsgThreadsLogPush(
-                        zconned_stdio_types::MsgThreadsLogPush { entries },
+                        zconned_stdio_types::MsgThreadsLogPush { packages },
                     )),
                 }]
             }
@@ -386,8 +434,10 @@ impl FakeCore {
         }]
     }
 
-    /// The synthetic arrival: a fresh thread with one message, stated
-    /// through the same statements a real arrival would use.
+    /// The synthetic arrival: a fresh thread with one message from a
+    /// toy network author, stated through the same delivery frame a
+    /// real arrival uses (the author's signature has landed — the
+    /// roster rides the package).
     fn arrive(&mut self) -> Vec<OutgoingFrame> {
         let id = self.fresh_ref();
         let content = Value {
@@ -395,6 +445,8 @@ impl FakeCore {
             data: "hello from the network (synthetic arrival)".into(),
         };
         let content_ref = self.resource(&content);
+        let author = toy_peer();
+        let author_anchor = anchor_of(&author);
         let entry = zconned_stdio_types::Entry {
             ver_major: 1,
             ver_minor: 0,
@@ -403,7 +455,7 @@ impl FakeCore {
                 ts: Some(self.now_ts()),
                 algo: "sha3-256".into(),
                 digest: resource_digest("application/vnd.zconn.msg", &content_ref.digest).to_vec(),
-                from: Vec::new(),
+                from: author_anchor.clone(),
             }),
             content: Some(zconned_stdio_types::ResolvedSlot {
                 r#ref: Some(content_ref),
@@ -411,14 +463,25 @@ impl FakeCore {
             }),
             claims: Vec::new(),
         };
+        let package = MsgPackage {
+            entry: Some(entry),
+            local: Some(Local {
+                remark: None,
+                signer: vec![Identity {
+                    anchor: author_anchor.clone(),
+                    remark: None,
+                }],
+            }),
+        };
+        self.observe_identity(&author_anchor);
         self.threads.push(Thread {
-            id: id.clone(),
-            log: vec![entry.clone()],
+            id,
+            log: vec![package.clone()],
         });
         vec![
             OutgoingFrame {
-                frame: Some(Out::MsgAdded(zconned_stdio_types::MsgAdded {
-                    entry: Some(entry),
+                frame: Some(Out::MsgPackagePush(zconned_stdio_types::MsgPackagePush {
+                    package: Some(package),
                 })),
             },
             OutgoingFrame {
@@ -469,6 +532,7 @@ impl FakeCore {
             })
             .collect();
 
+        let self_anchor = anchor_of(&self.self_peer);
         let entry = Entry {
             ver_major: 1,
             ver_minor: 0,
@@ -479,7 +543,7 @@ impl FakeCore {
                 // Placeholder recipe — the fake is not the digest
                 // machine; the shape is what matters for the shell.
                 digest: resource_digest("application/vnd.zconn.msg", &content_ref.digest).to_vec(),
-                from: Vec::new(),
+                from: self_anchor.clone(),
             }),
             content: Some(ResolvedSlot {
                 r#ref: Some(content_ref),
@@ -495,16 +559,30 @@ impl FakeCore {
             algo: "sha3-256".into(),
             digest: entry.meta.as_ref().unwrap().digest.clone(),
         };
+        // The toy auto-signs its own rows: the roster rides the
+        // package (the real core assembles it complete at the
+        // commit).
+        let package = MsgPackage {
+            entry: Some(entry),
+            local: Some(Local {
+                remark: None,
+                signer: vec![Identity {
+                    anchor: self_anchor.clone(),
+                    remark: None,
+                }],
+            }),
+        };
+        self.observe_identity(&self_anchor);
         if let Some(t) = self.threads.last_mut() {
-            t.log.push(entry.clone());
+            t.log.push(package.clone());
         }
         self.cursor = vec![tip];
         self.content = None;
         self.claims.clear();
 
         let mut out = vec![OutgoingFrame {
-            frame: Some(Out::MsgAdded(zconned_stdio_types::MsgAdded {
-                entry: Some(entry),
+            frame: Some(Out::MsgPackagePush(zconned_stdio_types::MsgPackagePush {
+                package: Some(package),
             })),
         }];
         out.extend(self.draft_push());

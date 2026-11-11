@@ -15,6 +15,7 @@ path = "src/main.rs"
 protobuf-varint-deframer.workspace = true
 zconned-stdio-types.workspace = true
 zconned-material.workspace = true
+zconned-crypto.workspace = true
 prost.workspace = true
 pbjson-types.workspace = true
 prost-types.workspace = true

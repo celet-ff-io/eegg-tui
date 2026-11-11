@@ -68,9 +68,9 @@ fn phase_flow(core_cmd: &str) -> miette::Result<()> {
     send(IncomingFrame {
         method: Some(Method::MsgDraftCommit(MsgDraftCommit {})),
     })?;
-    assert!(matches!(recv(&mut stdout)?, Out::MsgAdded(_)));
+    assert!(matches!(recv(&mut stdout)?, Out::MsgPackagePush(_)));
     assert!(matches!(recv(&mut stdout)?, Out::MsgDraftPush(_)));
-    println!("[phase 1] commit ok");
+    println!("[phase 1] commit ok (package + resting draft)");
 
     let status = core.shutdown().into_diagnostic()?;
     assert!(status.success(), "core must exit 0 on our EOF");
@@ -126,12 +126,13 @@ fn phase_toy(fake_cmd: &str) -> miette::Result<()> {
     assert!(matches!(recv(&mut stdout)?, Out::PeersPush(_)));
     println!("[phase 2] peers round-trip ok");
 
-    // The synthetic arrival: the notice leads, the thread list follows.
+    // The synthetic arrival: the package push leads, the thread list
+    // follows.
     let first = recv(&mut stdout)?;
     let second = recv(&mut stdout)?;
     assert!(
-        matches!(&first, Out::MsgAdded(_)) && matches!(&second, Out::MsgThreadsPush(_)),
-        "expected MsgAdded then MsgThreadsPush, got {first:?} / {second:?}"
+        matches!(&first, Out::MsgPackagePush(_)) && matches!(&second, Out::MsgThreadsPush(_)),
+        "expected MsgPackagePush then MsgThreadsPush, got {first:?} / {second:?}"
     );
     println!("[phase 2] arrival ok");
 

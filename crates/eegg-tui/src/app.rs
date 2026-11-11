@@ -48,22 +48,82 @@ pub enum FileBox {
     SaveTranscript,
 }
 
-/// The profile popup's two domains: the MAILBOX book (who mail is
-/// exchanged with — the manual card set) and the AUTHOR registry
-/// (which sender identities the received messages have shown —
-/// keyed by the same anchor; verified = its record signature
-/// rostered, observed = envelope only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ProfileTab {
-    #[default]
-    Mailbox,
-    Authors,
-}
-
+/// The content a region can hold — the wheel's 1..4 menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pane {
+pub enum ContentKind {
     Threads,
     Transcript,
+    Authors,
+    Mailboxes,
+}
+
+impl ContentKind {
+    /// The title word (`1 threads`).
+    pub fn title(self) -> &'static str {
+        match self {
+            ContentKind::Threads => "threads",
+            ContentKind::Transcript => "transcript",
+            ContentKind::Authors => "authors",
+            ContentKind::Mailboxes => "mailboxes",
+        }
+    }
+
+    /// The wheel order (1..4).
+    pub fn nth(n: usize) -> ContentKind {
+        [
+            ContentKind::Threads,
+            ContentKind::Transcript,
+            ContentKind::Authors,
+            ContentKind::Mailboxes,
+        ][n]
+    }
+}
+
+/// One region: which content it shows, plus that content's VIEW
+/// state. The view state is per-region on purpose — the same content
+/// open in both regions keeps independent cursors; the DATA it
+/// renders stays global (the core's truth is shared).
+#[derive(Debug)]
+pub struct Viewport {
+    pub content: ContentKind,
+    pub threads_sel: ListState,
+    pub transcript_sel: ListState,
+    pub authors_sel: ListState,
+    pub mailboxes_sel: ListState,
+    /// This region's transcript viewport row count at the last
+    /// render — the PgUp/PgDn page.
+    pub page_rows: u16,
+}
+
+impl Viewport {
+    /// The ACTIVE content's selection (the list-motion layer works
+    /// on whatever the region currently shows).
+    fn sel_mut(&mut self) -> &mut ListState {
+        match self.content {
+            ContentKind::Threads => &mut self.threads_sel,
+            ContentKind::Transcript => &mut self.transcript_sel,
+            ContentKind::Authors => &mut self.authors_sel,
+            ContentKind::Mailboxes => &mut self.mailboxes_sel,
+        }
+    }
+
+    fn new(content: ContentKind) -> Self {
+        Self {
+            content,
+            threads_sel: ListState::default(),
+            transcript_sel: ListState::default(),
+            authors_sel: ListState::default(),
+            mailboxes_sel: ListState::default(),
+            page_rows: 0,
+        }
+    }
+}
+
+/// What holds the focus: a numbered region, or the composer (the
+/// transcript region's sub-window — never a region of its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Region(usize),
     Compose,
 }
 
@@ -79,11 +139,18 @@ pub enum ComposeMode {
 
 #[derive(Debug)]
 pub struct App {
-    pub focus: Pane,
+    pub focus: Focus,
+    /// The regions (two now; the later layout engine grows the
+    /// vector without a rewrite).
+    pub regions: Vec<Viewport>,
+    /// The composer renders inside its HOST region's transcript —
+    /// fixed at summon time.
+    pub compose_host: usize,
+    /// The wheel: the in-place content menu over the focused region
+    /// (a modal — it eats every key until closed).
+    pub wheel: bool,
     pub threads: Vec<MsgRef>,
-    pub thread_sel: ListState,
     pub entries: Vec<Entry>,
-    pub transcript_sel: ListState,
     /// The thread whose log the transcript currently shows (the reply
     /// base and the arrival-routing hint).
     pub open_thread: Option<MsgRef>,
@@ -96,9 +163,6 @@ pub struct App {
     /// The composer's mode: typing vs the structural face (Esc
     /// steps between them; navigation back in returns to typing).
     pub compose_mode: ComposeMode,
-    /// The transcript viewport's row count at the last render —
-    /// the PgUp/PgDn page.
-    pub viewport_rows: u16,
     /// The staged commit base (from msg_cursor_push; empty = not set).
     pub cursor: Vec<MsgRef>,
     /// Set by the new-thread key: the next send starts a FRESH chain
@@ -111,14 +175,12 @@ pub struct App {
     /// copy source for the counterpart's paste-in).
     pub peers: Vec<Peer>,
     pub self_card: Option<String>,
-    pub show_peers: bool,
     /// The lazygit-style help overlay (opened with `?`); it eats all
     /// keys until closed (Esc / ? / q).
     pub show_help: bool,
     /// The help overlay's scroll offset (j/k; a short terminal
     /// scrolls the card instead of clipping it).
     pub help_scroll: u16,
-    pub peers_sel: ListState,
     pub peer_input: Input,
     /// The active bottom box in the peers popup.
     pub card_flow: CardFlow,
@@ -142,11 +204,7 @@ pub struct App {
     /// domain of the profile popup; separate from the mailbox book
     /// even though both index by the anchor.
     pub authors: BTreeMap<Vec<u8>, AuthorEntry>,
-    /// The profile popup's active domain.
-    pub profile_tab: ProfileTab,
-    /// The authors tab's selection.
-    pub authors_sel: ListState,
-    /// The remark input (the AUTHORS tab's bottom box).
+    /// The remark input (the authors content's bottom box).
     pub remark_input: Input,
     /// Set between a remark mutation request and its IdentitiesPush
     /// receipt: the receipt then also re-fetches the displayed
@@ -261,25 +319,26 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         Self {
-            focus: Pane::Threads,
+            focus: Focus::Region(0),
+            regions: vec![
+                Viewport::new(ContentKind::Threads),
+                Viewport::new(ContentKind::Transcript),
+            ],
+            compose_host: 1,
+            wheel: false,
             threads: Vec::new(),
-            thread_sel: ListState::default(),
             entries: Vec::new(),
-            transcript_sel: ListState::default(),
             open_thread: None,
             draft: Draft::new(),
             show_compose: false,
             compose_mode: ComposeMode::Input,
-            viewport_rows: 0,
             cursor: Vec::new(),
             new_thread_intent: false,
             staged: None,
             peers: Vec::new(),
             self_card: None,
-            show_peers: false,
             show_help: false,
             help_scroll: 0,
-            peers_sel: ListState::default(),
             peer_input: Input::default(),
             card_flow: CardFlow::None,
             file_input: Input::default(),
@@ -287,8 +346,6 @@ impl App {
             save_card: None,
             locals: BTreeMap::new(),
             authors: BTreeMap::new(),
-            profile_tab: ProfileTab::default(),
-            authors_sel: ListState::default(),
             remark_input: Input::default(),
             awaiting_remark_receipt: false,
             sent: Vec::new(),
@@ -353,36 +410,36 @@ impl App {
         });
     }
 
+    /// The forward focus cycle: region 1 → region 2 → the composer
+    /// (only when summoned) → region 1.
     fn cycle_focus(&mut self) {
         self.focus = match self.focus {
-            Pane::Threads => Pane::Transcript,
-            // The collapsed composer is out of the cycle; `i`
-            // summons it.
-            Pane::Transcript => {
+            Focus::Region(0) => Focus::Region(1),
+            Focus::Region(_) => {
                 if self.show_compose {
-                    Pane::Compose
+                    Focus::Compose
                 } else {
-                    Pane::Threads
+                    Focus::Region(0)
                 }
             }
-            Pane::Compose => Pane::Threads,
+            Focus::Compose => Focus::Region(0),
         };
         self.entered_compose();
     }
 
     /// The reverse cycle (Ctrl+k / plain k in the composer's moving
-    /// mode): compose → transcript → threads → compose.
+    /// mode): compose → region 2 → region 1 → compose.
     fn cycle_focus_back(&mut self) {
         self.focus = match self.focus {
-            Pane::Compose => Pane::Transcript,
-            Pane::Transcript => Pane::Threads,
-            Pane::Threads => {
+            Focus::Compose => Focus::Region(self.compose_host.min(1)),
+            Focus::Region(0) => {
                 if self.show_compose {
-                    Pane::Compose
+                    Focus::Compose
                 } else {
-                    Pane::Transcript
+                    Focus::Region(1)
                 }
             }
+            Focus::Region(_) => Focus::Region(0),
         };
         self.entered_compose();
     }
@@ -390,30 +447,42 @@ impl App {
     /// Landing on the composer through NAVIGATION returns it to the
     /// typing mode (the draft is untouched — only the face swaps).
     fn entered_compose(&mut self) {
-        if self.focus == Pane::Compose {
+        if self.focus == Focus::Compose {
             self.compose_mode = ComposeMode::Input;
         }
     }
 
-    /// Direct structural jumps (Ctrl+h/l and the composer's moving
-    /// mode).
-    fn nav_to(&mut self, pane: Pane) {
-        self.focus = pane;
-        self.entered_compose();
+    /// Direct structural jumps: to a numbered region (Ctrl+h/l, the
+    /// arrows, 1/2; the composer's moving mode rides the same layer).
+    fn nav_to_region(&mut self, region: usize) {
+        self.focus = Focus::Region(region.min(self.regions.len().saturating_sub(1)));
     }
 
-    /// PgUp/PgDn: the selection moves by a page (the last render's
-    /// transcript viewport height; a sane page before first paint).
+    /// The focused region's index (the composer has none — its host
+    /// region stands in for view-state purposes).
+    pub(crate) fn focus_region(&self) -> usize {
+        match self.focus {
+            Focus::Region(i) => i.min(self.regions.len().saturating_sub(1)),
+            Focus::Compose => self.compose_host.min(self.regions.len().saturating_sub(1)),
+        }
+    }
+
+    /// PgUp/PgDn: the selection moves by a page (the focused
+    /// region's last rendered transcript viewport height; a sane
+    /// page before first paint).
     fn page_sel(&mut self, dir: isize) {
-        let page = self.viewport_rows.max(2) as isize - 1;
+        let page = self.regions[self.focus_region()].page_rows.max(2) as isize - 1;
         self.move_sel(dir * page);
     }
 
     fn move_sel(&mut self, delta: isize) {
-        let (list, len) = match self.focus {
-            Pane::Threads => (&mut self.thread_sel, self.threads.len()),
-            Pane::Transcript => (&mut self.transcript_sel, self.entries.len()),
-            Pane::Compose => return,
+        let fi = self.focus_region();
+        let kind = self.regions[fi].content;
+        let (list, len) = match kind {
+            ContentKind::Threads => (&mut self.regions[fi].threads_sel, self.threads.len()),
+            ContentKind::Transcript => (&mut self.regions[fi].transcript_sel, self.entries.len()),
+            ContentKind::Authors => (&mut self.regions[fi].authors_sel, self.authors.len()),
+            ContentKind::Mailboxes => (&mut self.regions[fi].mailboxes_sel, self.peers.len() + 1),
         };
         let Some(i) = list.selected() else {
             if len > 0 {
@@ -425,30 +494,94 @@ impl App {
         list.select(Some(next));
     }
 
-    /// Enter on the threads pane: fetch the selected thread's log
-    /// (reads are cursor-independent — browsing never moves the anchor).
-    fn open_selected_thread(&mut self) {
-        let thread = self
-            .thread_sel
+    /// The active list's length (for g/G jump-to-end).
+    fn sel_len(&self) -> usize {
+        let fi = self.focus_region();
+        match self.regions[fi].content {
+            ContentKind::Threads => self.threads.len(),
+            ContentKind::Transcript => self.entries.len(),
+            ContentKind::Authors => self.authors.len(),
+            ContentKind::Mailboxes => self.peers.len() + 1,
+        }
+    }
+
+    /// g/Home: jump the active list's selection to the top.
+    fn sel_home(&mut self) {
+        let fi = self.focus_region();
+        let has = self.sel_len() > 0;
+        self.regions[fi]
+            .sel_mut()
+            .select(if has { Some(0) } else { None });
+    }
+
+    /// G/End: jump the active list's selection to the bottom.
+    fn sel_end(&mut self) {
+        let fi = self.focus_region();
+        let n = self.sel_len();
+        self.regions[fi]
+            .sel_mut()
+            .select(if n > 0 { Some(n - 1) } else { None });
+    }
+
+    /// Switch a region's content (the wheel's 1..4, `p`, opening a
+    /// thread). Switching the composer's host region away from the
+    /// transcript collapses the composer — its surface is gone.
+    fn set_region_content(&mut self, region: usize, kind: ContentKind) {
+        let region = region.min(self.regions.len().saturating_sub(1));
+        if self.regions[region].content == kind {
+            return;
+        }
+        if self.show_compose && self.compose_host == region {
+            self.show_compose = false;
+            self.compose_mode = ComposeMode::Input;
+            if self.focus == Focus::Compose {
+                self.focus = Focus::Region(region);
+            }
+        }
+        self.regions[region].content = kind;
+        match kind {
+            // One refresh per activation (cheap; the sets are small).
+            ContentKind::Mailboxes => {
+                self.regions[region].mailboxes_sel.select(Some(0));
+                self.refresh_peers();
+                self.refresh_self();
+                self.refresh_identities();
+            }
+            // A fresh wholesale get per activation of the registry.
+            ContentKind::Authors => {
+                self.regions[region].authors_sel.select(Some(0));
+                self.refresh_identities();
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter on a threads region: fetch the selected thread's log
+    /// (reads are cursor-independent — browsing never moves the
+    /// anchor) and turn the region into its transcript.
+    fn open_selected_thread(&mut self, region: usize) {
+        let fi = region.min(self.regions.len().saturating_sub(1));
+        let thread = self.regions[fi]
+            .threads_sel
             .selected()
             .and_then(|i| self.threads.get(i).cloned());
         if let Some(t) = thread {
             self.entries.clear();
             self.locals.clear();
-            self.transcript_sel.select(Some(0));
             self.open_thread = Some(t.clone());
             self.outbox.push(IncomingFrame {
                 method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
                     thread: Some(t.clone()),
                 })),
             });
-            self.focus = Pane::Transcript;
+            self.set_region_content(fi, ContentKind::Transcript);
+            self.regions[fi].transcript_sel.select(Some(0));
         }
     }
 
     /// The selected author's anchor (BTreeMap order = anchor order).
     fn selected_author(&self) -> Option<Vec<u8>> {
-        let i = self.authors_sel.selected()?;
+        let i = self.regions[self.focus_region()].authors_sel.selected()?;
         self.authors.keys().nth(i).cloned()
     }
 
@@ -470,26 +603,33 @@ impl App {
         Some(std::path::PathBuf::from(path))
     }
 
-    /// The selected transcript row (the yank/write target).
+    /// The selected transcript row of the FOCUSED region (the
+    /// yank/write target).
     fn selected_entry(&self) -> Option<&zconned_stdio_types::Entry> {
-        let i = self.transcript_sel.selected()?;
+        let i = self.regions[self.focus_region()]
+            .transcript_sel
+            .selected()?;
         self.entries.get(i)
     }
 
-    /// The selected entry's card text in the profile popup, per
-    /// tab: mailboxes — row 0 = my card (verbatim from the core),
-    /// the rest = the peer set, re-encoded canonically (the card
-    /// text IS the record's canonical single-line base64); authors
-    /// — the anchor's card, only if the book holds that mailbox.
+    /// The selected entry's card text, per the focused region's
+    /// content: mailboxes — row 0 = my card (verbatim from the
+    /// core), the rest = the peer set, re-encoded canonically (the
+    /// card text IS the record's canonical single-line base64);
+    /// authors — the anchor's card, only if the book holds that
+    /// mailbox.
     fn selected_card(&self) -> Option<String> {
-        match self.profile_tab {
-            ProfileTab::Authors => self
+        match self.regions[self.focus_region()].content {
+            ContentKind::Authors => self
                 .selected_author()
                 .and_then(|a| self.peers.iter().find(|p| anchor_of(p) == a).map(card_text)),
-            ProfileTab::Mailbox => match self.peers_sel.selected() {
-                Some(i) if i > 0 => self.peers.get(i - 1).map(card_text),
-                _ => self.self_card.clone(),
-            },
+            ContentKind::Mailboxes => {
+                match self.regions[self.focus_region()].mailboxes_sel.selected() {
+                    Some(i) if i > 0 => self.peers.get(i - 1).map(card_text),
+                    _ => self.self_card.clone(),
+                }
+            }
+            _ => None,
         }
     }
 
@@ -597,8 +737,8 @@ impl App {
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
             match key.code {
-                KeyCode::Char('h') | KeyCode::Left => self.nav_to(Pane::Threads),
-                KeyCode::Char('l') | KeyCode::Right => self.nav_to(Pane::Transcript),
+                KeyCode::Char('h') | KeyCode::Left => self.nav_to_region(0),
+                KeyCode::Char('l') | KeyCode::Right => self.nav_to_region(1),
                 KeyCode::Char('j') | KeyCode::Down => self.cycle_focus(),
                 KeyCode::Char('k') | KeyCode::Up => self.cycle_focus_back(),
                 _ => return,
@@ -611,13 +751,11 @@ impl App {
             // typing.
             (ComposeMode::Nav, KeyCode::Esc) => {
                 self.show_compose = false;
-                self.focus = Pane::Transcript;
+                self.focus = Focus::Region(self.compose_host);
                 self.compose_mode = ComposeMode::Input;
             }
-            (ComposeMode::Nav, KeyCode::Char('h') | KeyCode::Left) => self.nav_to(Pane::Threads),
-            (ComposeMode::Nav, KeyCode::Char('l') | KeyCode::Right) => {
-                self.nav_to(Pane::Transcript)
-            }
+            (ComposeMode::Nav, KeyCode::Char('h') | KeyCode::Left) => self.nav_to_region(0),
+            (ComposeMode::Nav, KeyCode::Char('l') | KeyCode::Right) => self.nav_to_region(1),
             (ComposeMode::Nav, KeyCode::Char('j') | KeyCode::Down) => self.cycle_focus(),
             (ComposeMode::Nav, KeyCode::Char('k') | KeyCode::Up) => self.cycle_focus_back(),
             (ComposeMode::Nav, KeyCode::Char('i')) => self.compose_mode = ComposeMode::Input,
@@ -690,7 +828,7 @@ impl App {
         }
         self.draft.clear();
         self.show_compose = false;
-        self.focus = Pane::Transcript;
+        self.focus = Focus::Region(self.compose_host);
         self.compose_mode = ComposeMode::Input;
         // The timestamp discipline: the interface keeps the
         // "stamped" state (a stamp within the last window). When the
@@ -818,9 +956,11 @@ impl App {
         (covered, mailed)
     }
 
-    /// Keys while the peers popup is up; `false` = the popup closed
-    /// (the caller's key handling ends here).
-    fn on_key_peers(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+    /// Keys while a card/remark/path flow input is up (the input
+    /// boxes live at the bottom of their region content); the flow
+    /// eats every key until it ends. The LIST posture around the
+    /// flows (add/copy/save, j/k) belongs to the content tables.
+    fn on_key_card_flow(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         match (self.card_flow, key.code) {
             // Typing the pasted card: Ctrl-V = paste from the
@@ -889,7 +1029,7 @@ impl App {
             (CardFlow::SaveCard, KeyCode::Enter) => {
                 let Some(card) = self.save_card.clone() else {
                     self.flash = Some("no card to save".into());
-                    return true;
+                    return;
                 };
                 let path = self.expanded_path();
                 match path {
@@ -912,27 +1052,6 @@ impl App {
             }
             (CardFlow::ReadCard | CardFlow::SaveCard, _) => {
                 self.file_input.handle_event(&Event::Key(key));
-            }
-            // The remark edit: an AUTHORS-tab action on the selected
-            // identity (the registry is the remark's authority).
-            (CardFlow::None, KeyCode::Char('r')) if self.profile_tab == ProfileTab::Authors => {
-                self.remark_input.reset();
-                self.card_flow = CardFlow::InputRemark;
-            }
-            // Clear the selected identity's remark (the registry's
-            // reset verb; the receipt is an IdentitiesPush).
-            (CardFlow::None, KeyCode::Char('R')) if self.profile_tab == ProfileTab::Authors => {
-                match self.selected_author() {
-                    Some(anchor) => {
-                        self.outbox.push(IncomingFrame {
-                            method: Some(Method::IdentityRemarkReset(IdentityRemarkReset {
-                                anchor,
-                            })),
-                        });
-                        self.awaiting_remark_receipt = true;
-                    }
-                    None => self.flash = Some("no identity selected".into()),
-                }
             }
             // The remark input: Enter submits (the core answers
             // remark_required on an empty remark — pre-checked here),
@@ -978,85 +1097,8 @@ impl App {
             (CardFlow::InputRemark, _) => {
                 self.remark_input.handle_event(&Event::Key(key));
             }
-            // Listing posture.
-            // Adding a card is a MAILBOX-domain action.
-            (CardFlow::None, KeyCode::Char('a')) if self.profile_tab == ProfileTab::Mailbox => {
-                self.peer_input.reset();
-                self.card_flow = CardFlow::InputCard;
-            }
-            // The profile popup's two domains flip with Tab.
-            (CardFlow::None, KeyCode::Tab) => {
-                self.profile_tab = match self.profile_tab {
-                    ProfileTab::Mailbox => ProfileTab::Authors,
-                    ProfileTab::Authors => ProfileTab::Mailbox,
-                };
-                match self.profile_tab {
-                    ProfileTab::Authors => {
-                        self.authors_sel.select(Some(0));
-                        // A fresh wholesale get per open of the tab.
-                        self.refresh_identities();
-                    }
-                    ProfileTab::Mailbox => self.peers_sel.select(Some(0)),
-                }
-            }
-            // Copy the SELECTED card to the clipboard (a mailbox's
-            // or — on the authors tab — an author whose card the
-            // book holds; the clipboard may be unavailable — the
-            // file channel is the fallback).
-            (CardFlow::None, KeyCode::Char('c')) => {
-                self.flash = Some(match self.selected_card() {
-                    Some(card) => clipboard::set(&card)
-                        .map(|()| "card copied to clipboard".to_owned())
-                        .unwrap_or_else(|reason| format!("{reason} — use s to save a file")),
-                    None => "no card to copy".into(),
-                });
-            }
-            // Save the SELECTED card to a file (resolved NOW — a
-            // set refresh before Enter never repoints it).
-            (CardFlow::None, KeyCode::Char('s')) => match self.selected_card() {
-                Some(card) => {
-                    self.file_input.reset();
-                    self.save_card = Some(card);
-                    self.card_flow = CardFlow::SaveCard;
-                }
-                None => self.flash = Some("no card to save".into()),
-            },
-            // The active tab's list moves; the mailbox tab's
-            // selection spans (me) + the peer set (row 0 = me
-            // always exists, even with an empty set).
-            (CardFlow::None, KeyCode::Up | KeyCode::Char('k')) => match self.profile_tab {
-                ProfileTab::Mailbox => {
-                    let i = self.peers_sel.selected().unwrap_or(0);
-                    self.peers_sel.select(Some(i.saturating_sub(1)));
-                }
-                ProfileTab::Authors => {
-                    let n = self.authors.len();
-                    let i = self.authors_sel.selected().unwrap_or(0);
-                    self.authors_sel
-                        .select((n > 0).then_some(i.saturating_sub(1)));
-                }
-            },
-            (CardFlow::None, KeyCode::Down | KeyCode::Char('j')) => match self.profile_tab {
-                ProfileTab::Mailbox => {
-                    let n = self.peers.len();
-                    let i = self.peers_sel.selected().unwrap_or(0);
-                    self.peers_sel.select(Some((i + 1).min(n)));
-                }
-                ProfileTab::Authors => {
-                    let n = self.authors.len();
-                    let i = self.authors_sel.selected().unwrap_or(0);
-                    self.authors_sel
-                        .select((n > 0).then_some((i + 1).min(n - 1)));
-                }
-            },
-            (CardFlow::None, KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q')) => {
-                self.show_peers = false;
-                return false;
-            }
-            (CardFlow::None, KeyCode::Char('?')) => self.show_help = true,
             (CardFlow::None, _) => {}
         }
-        true
     }
 
     fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
@@ -1094,8 +1136,25 @@ impl App {
             return;
         }
 
-        if self.show_peers {
-            self.on_key_peers(key);
+        // The wheel: a modal over the focused region — 1..4 picks
+        // the content, Esc/o closes without change, the rest is
+        // ignored (q is NOT bound: q means quit, everywhere).
+        if self.wheel {
+            match key.code {
+                KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
+                    let n = c.to_digit(10).expect("checked") as usize - 1;
+                    self.wheel = false;
+                    self.set_region_content(self.focus_region(), ContentKind::nth(n));
+                }
+                KeyCode::Esc | KeyCode::Char('o') => self.wheel = false,
+                _ => {}
+            }
+            return;
+        }
+
+        // A card/remark/path flow input eats every key.
+        if self.card_flow != CardFlow::None {
+            self.on_key_card_flow(key);
             return;
         }
 
@@ -1119,11 +1178,14 @@ impl App {
             return;
         }
 
-        if self.focus == Pane::Compose {
+        if self.focus == Focus::Compose {
             self.on_key_compose(key);
             return;
         }
 
+        // Region focus from here. The STRUCTURAL layer first (it
+        // works over every content), then the true globals, then the
+        // generic list motion, then the focused content's own keys.
         match key.code {
             // The help overlay (lazygit-style); the input panes
             // keep typing a literal '?'.
@@ -1133,99 +1195,166 @@ impl App {
             // The structural layer: Ctrl+hjkl navigates from ANY
             // focus (plain hjkl belongs to the focused content: the
             // lists scroll, the composer types).
-            KeyCode::Char('h') if key.modifiers == KeyModifiers::CONTROL => {
-                self.nav_to(Pane::Threads)
-            }
-            KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
-                self.nav_to(Pane::Transcript)
-            }
+            KeyCode::Char('h') if key.modifiers == KeyModifiers::CONTROL => self.nav_to_region(0),
+            KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => self.nav_to_region(1),
             KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus(),
             KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus_back(),
             // The arrow keys mirror hjkl on the structural layer too.
-            KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => self.nav_to(Pane::Threads),
-            KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => {
-                self.nav_to(Pane::Transcript)
-            }
+            KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => self.nav_to_region(0),
+            KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => self.nav_to_region(1),
             KeyCode::Up if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus_back(),
             KeyCode::Down if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus(),
-            // The transcript pages by the last rendered viewport.
-            KeyCode::PageUp if self.focus == Pane::Transcript => self.page_sel(-1),
-            KeyCode::PageDown if self.focus == Pane::Transcript => self.page_sel(1),
-            // The horizontal pane navigation (lazygit-style): h = the
-            // left panel, l = the right one. The compose pane stays
-            // Tab-only — h/j/k/l type literal text while composing.
-            KeyCode::Char('h') => self.focus = Pane::Threads,
-            KeyCode::Char('l') => self.focus = Pane::Transcript,
-            KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
-            KeyCode::Home | KeyCode::Char('g') => match self.focus {
-                Pane::Threads => self.thread_sel.select(Some(0)),
-                Pane::Transcript => self.transcript_sel.select(Some(0)),
-                Pane::Compose => {}
-            },
-            KeyCode::End | KeyCode::Char('G') => match self.focus {
-                Pane::Threads => {
-                    let n = self.threads.len();
-                    self.thread_sel
-                        .select(if n > 0 { Some(n - 1) } else { None });
-                }
-                Pane::Transcript => {
-                    let n = self.entries.len();
-                    self.transcript_sel
-                        .select(if n > 0 { Some(n - 1) } else { None });
-                }
-                Pane::Compose => {}
-            },
-            KeyCode::Char('t') if self.focus == Pane::Threads => self.refresh_threads(),
-            // The transcript text channels: yank to the clipboard,
-            // save to a file (the path box).
-            KeyCode::Char('y') if self.focus == Pane::Transcript => self.transcript_yank(),
-            KeyCode::Char('w') if self.focus == Pane::Transcript => {
-                self.file_input.reset();
-                self.file_box = FileBox::SaveTranscript;
+            // The numbered regions: the direct jump (no cycling).
+            KeyCode::Char('1') => self.nav_to_region(0),
+            KeyCode::Char('2') => self.nav_to_region(1),
+            // The wheel: the in-place content menu over this region.
+            KeyCode::Char('o') => self.wheel = true,
+            // The mailboxes, right here: focus stays, the content
+            // swaps.
+            KeyCode::Char('p') => {
+                let fi = self.focus_region();
+                self.set_region_content(fi, ContentKind::Mailboxes);
             }
-            KeyCode::Char('r') => self.refresh_draft(),
-            // New-thread compose: the next send starts a fresh chain
-            // even though a thread transcript is open.
-            KeyCode::Char('n') => {
-                self.new_thread_intent = true;
-                self.show_compose = true;
-                // Through nav_to: landing on the composer ALWAYS
-                // returns it to the typing mode (a stuck moving face
-                // must never survive a summon).
-                self.nav_to(Pane::Compose);
-                self.flash = Some("new thread".into());
-            }
-            // Summon the composer (leaving it was Esc — symmetric
-            // entry; typing starts immediately). The composer is the
-            // transcript's sub-window: other panes have no compose,
-            // so the summon is transcript-only.
-            KeyCode::Char('i') if self.focus == Pane::Transcript => {
-                self.show_compose = true;
-                self.nav_to(Pane::Compose);
-            }
+            KeyCode::Char('h') => self.nav_to_region(0),
+            KeyCode::Char('l') => self.nav_to_region(1),
             // The core's stderr ring — the diagnosis window (a talky
             // core: --core "zconned -v").
             KeyCode::Char('L') => {
                 self.show_log = !self.show_log;
                 self.log_scroll = 0;
             }
-            // The peers popup: the set + the core's own card, one
-            // refresh per open (cheap, and the set is small).
-            KeyCode::Char('p') => {
-                self.show_peers = true;
-                self.card_flow = CardFlow::None;
-                self.peers_sel.select(Some(0));
-                self.refresh_peers();
-                self.refresh_self();
-                // The AUTHOR registry: a wholesale re-get per open —
-                // the registry is the remark's authority, and the
-                // anchor set it states covers every observed
-                // identity.
-                self.refresh_identities();
+            // Generic list motion over the focused region's active
+            // content.
+            KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
+            KeyCode::Home | KeyCode::Char('g') => self.sel_home(),
+            KeyCode::End | KeyCode::Char('G') => self.sel_end(),
+            // The transcript pages by the region's last rendered
+            // viewport.
+            KeyCode::PageUp
+                if self.regions[self.focus_region()].content == ContentKind::Transcript =>
+            {
+                self.page_sel(-1)
             }
-            KeyCode::Enter if self.focus == Pane::Threads => self.open_selected_thread(),
-            _ => {}
+            KeyCode::PageDown
+                if self.regions[self.focus_region()].content == ContentKind::Transcript =>
+            {
+                self.page_sel(1)
+            }
+            _ => self.on_key_content(key),
+        }
+    }
+
+    /// The focused content's OWN keys (the content layer — what the
+    /// structural layer and the generic list motion leave behind).
+    fn on_key_content(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+        let fi = self.focus_region();
+        match self.regions[fi].content {
+            ContentKind::Threads => match key.code {
+                KeyCode::Char('t') => self.refresh_threads(),
+                KeyCode::Enter => self.open_selected_thread(fi),
+                _ => {}
+            },
+            ContentKind::Transcript => match key.code {
+                // The transcript text channels: yank to the
+                // clipboard, save to a file (the path box).
+                KeyCode::Char('y') => self.transcript_yank(),
+                KeyCode::Char('w') => {
+                    self.file_input.reset();
+                    self.file_box = FileBox::SaveTranscript;
+                }
+                KeyCode::Char('r') => self.refresh_draft(),
+                // New-thread compose: the next send starts a fresh
+                // chain even though a thread transcript is open.
+                KeyCode::Char('n') => {
+                    self.summon_compose(fi, true);
+                    self.flash = Some("new thread".into());
+                }
+                // Summon the composer (leaving it was Esc — symmetric
+                // entry; typing starts immediately). The composer is
+                // the transcript's sub-window: other contents have
+                // no compose.
+                KeyCode::Char('i') => self.summon_compose(fi, false),
+                _ => {}
+            },
+            ContentKind::Authors => match key.code {
+                // The remark edit on the selected identity (the
+                // registry is the remark's authority).
+                KeyCode::Char('r') => {
+                    self.remark_input.reset();
+                    self.card_flow = CardFlow::InputRemark;
+                }
+                // Clear the selected identity's remark (the
+                // registry's reset verb; the receipt is an
+                // IdentitiesPush).
+                KeyCode::Char('R') => match self.selected_author() {
+                    Some(anchor) => {
+                        self.outbox.push(IncomingFrame {
+                            method: Some(Method::IdentityRemarkReset(IdentityRemarkReset {
+                                anchor,
+                            })),
+                        });
+                        self.awaiting_remark_receipt = true;
+                    }
+                    None => self.flash = Some("no identity selected".into()),
+                },
+                KeyCode::Char('c') => self.copy_selected_card(),
+                KeyCode::Char('s') => self.save_selected_card(),
+                _ => {}
+            },
+            ContentKind::Mailboxes => match key.code {
+                // Adding a card is a MAILBOX-domain action.
+                KeyCode::Char('a') => {
+                    self.peer_input.reset();
+                    self.card_flow = CardFlow::InputCard;
+                }
+                KeyCode::Char('c') => self.copy_selected_card(),
+                KeyCode::Char('s') => self.save_selected_card(),
+                _ => {}
+            },
+        }
+    }
+
+    /// Summon the composer into `region`'s transcript: the region
+    /// becomes the transcript if it is not already (the composer has
+    /// no other home), then the focus lands on the composer in the
+    /// typing mode.
+    fn summon_compose(&mut self, region: usize, new_thread: bool) {
+        let fi = region.min(self.regions.len().saturating_sub(1));
+        self.set_region_content(fi, ContentKind::Transcript);
+        if new_thread {
+            self.new_thread_intent = true;
+        }
+        self.show_compose = true;
+        self.compose_host = fi;
+        self.focus = Focus::Compose;
+        self.compose_mode = ComposeMode::Input;
+    }
+
+    /// Copy the SELECTED card to the clipboard (a mailbox's or — in
+    /// the authors content — an author whose card the book holds;
+    /// the clipboard may be unavailable — the file channel is the
+    /// fallback).
+    fn copy_selected_card(&mut self) {
+        self.flash = Some(match self.selected_card() {
+            Some(card) => clipboard::set(&card)
+                .map(|()| "card copied to clipboard".to_owned())
+                .unwrap_or_else(|reason| format!("{reason} — use s to save a file")),
+            None => "no card to copy".into(),
+        });
+    }
+
+    /// Save the SELECTED card to a file (resolved NOW — a set
+    /// refresh before Enter never repoints it).
+    fn save_selected_card(&mut self) {
+        match self.selected_card() {
+            Some(card) => {
+                self.file_input.reset();
+                self.save_card = Some(card);
+                self.card_flow = CardFlow::SaveCard;
+            }
+            None => self.flash = Some("no card to save".into()),
         }
     }
 
@@ -1245,12 +1374,7 @@ impl App {
             Some(Out::MsgDraftPush(d)) => self.staged = Some((d.content, d.claims)),
             Some(Out::MsgThreadsPush(p)) => {
                 self.threads = p.threads.into_iter().filter_map(|t| t.thread).collect();
-                let n = self.threads.len();
-                let sel = self
-                    .thread_sel
-                    .selected()
-                    .map(|i| i.min(n.saturating_sub(1)));
-                self.thread_sel.select(sel.filter(|_| n > 0));
+                self.clamp_sels(ContentKind::Threads, self.threads.len());
             }
             Some(Out::MsgThreadsLogPush(p)) => {
                 // The log answer: one package per message, transcript
@@ -1284,12 +1408,7 @@ impl App {
                         ))
                     })
                     .collect();
-                let n = self.entries.len();
-                let sel = self
-                    .transcript_sel
-                    .selected()
-                    .map(|i| i.min(n.saturating_sub(1)));
-                self.transcript_sel.select(sel.filter(|_| n > 0));
+                self.clamp_sels(ContentKind::Transcript, self.entries.len());
             }
             Some(Out::ResourcePush(p)) => {
                 // A value that just landed in the core patches the
@@ -1444,14 +1563,14 @@ impl App {
             if continues {
                 self.entries.push(e);
                 let n = self.entries.len();
-                self.transcript_sel.select(Some(n - 1));
+                self.follow_transcripts(n - 1);
             } else if self.open_thread.is_none() {
                 // Nothing open: show the row and adopt its thread (a
                 // fresh commit's first prev IS the thread id — the
                 // genesis parent ref).
                 self.entries = vec![e.clone()];
                 self.open_thread = e.prev.first().cloned();
-                self.transcript_sel.select(Some(0));
+                self.follow_transcripts(0);
             }
             self.refresh_threads();
             self.flash = Some("msg arrived".into());
@@ -1485,6 +1604,31 @@ impl App {
         let entry = self.authors.entry(anchor.to_vec()).or_default();
         if verified {
             entry.verified = true;
+        }
+    }
+
+    /// Clamp one content's selection in EVERY region (the data the
+    /// regions render changed wholesale; the view state follows).
+    fn clamp_sels(&mut self, kind: ContentKind, n: usize) {
+        for vp in &mut self.regions {
+            let list = match kind {
+                ContentKind::Threads => &mut vp.threads_sel,
+                ContentKind::Transcript => &mut vp.transcript_sel,
+                ContentKind::Authors => &mut vp.authors_sel,
+                ContentKind::Mailboxes => &mut vp.mailboxes_sel,
+            };
+            let sel = list.selected().map(|i| i.min(n.saturating_sub(1)));
+            list.select(sel.filter(|_| n > 0));
+        }
+    }
+
+    /// Every transcript-viewing region follows the newest row (an
+    /// arrival is an attention event — the live tail is the point).
+    fn follow_transcripts(&mut self, row: usize) {
+        for vp in &mut self.regions {
+            if vp.content == ContentKind::Transcript {
+                vp.transcript_sel.select(Some(row));
+            }
         }
     }
 
@@ -1547,5 +1691,87 @@ pub fn preview_bytes(data: &[u8]) -> String {
         format!("{}\u{2026}", text.chars().take(48).collect::<String>())
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_the_host_region_away_collapses_the_composer() {
+        let mut app = App::new();
+        // Region 2 (index 1) holds the transcript by default.
+        app.summon_compose(1, false);
+        assert_eq!(app.focus, Focus::Compose);
+        assert!(app.show_compose);
+        app.set_region_content(1, ContentKind::Mailboxes);
+        assert!(!app.show_compose, "the composer's surface is gone");
+        assert_eq!(app.focus, Focus::Region(1), "the focus lands back here");
+    }
+
+    #[test]
+    fn region_content_activation_fires_the_refreshes() {
+        let mut app = App::new();
+        app.set_region_content(0, ContentKind::Authors);
+        assert_eq!(app.regions[0].content, ContentKind::Authors);
+        assert!(
+            app.outbox
+                .iter()
+                .any(|f| matches!(f.method, Some(Method::IdentitiesGet(_))))
+        );
+        app.outbox.clear();
+        app.set_region_content(0, ContentKind::Mailboxes);
+        assert!(app.outbox.iter().any(|f| matches!(
+            f.method,
+            Some(Method::PeersGet(_)) | Some(Method::SelfGet(_)) | Some(Method::IdentitiesGet(_))
+        )));
+    }
+
+    #[test]
+    fn opening_a_thread_turns_the_region_into_its_transcript() {
+        let mut app = App::new();
+        app.threads = vec![MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: "ed25519".into(),
+            digest: vec![1, 2, 3],
+        }];
+        app.regions[0].threads_sel.select(Some(0));
+        app.open_selected_thread(0);
+        assert_eq!(app.regions[0].content, ContentKind::Transcript);
+        assert!(
+            app.outbox
+                .iter()
+                .any(|f| matches!(f.method, Some(Method::MsgThreadsLogGet(_))))
+        );
+        assert!(app.open_thread.is_some());
+    }
+
+    #[test]
+    fn a_wholesale_data_change_clamps_every_regions_view() {
+        let mut app = App::new();
+        // Both regions show threads; one sits on a now-gone row.
+        app.set_region_content(1, ContentKind::Threads);
+        app.regions[0].threads_sel.select(Some(5));
+        app.regions[1].threads_sel.select(Some(9));
+        app.clamp_sels(ContentKind::Threads, 2);
+        assert_eq!(app.regions[0].threads_sel.selected(), Some(1));
+        assert_eq!(app.regions[1].threads_sel.selected(), Some(1));
+        // The empty set clears the selection everywhere.
+        app.clamp_sels(ContentKind::Threads, 0);
+        assert_eq!(app.regions[0].threads_sel.selected(), None);
+    }
+
+    #[test]
+    fn the_wheel_number_selects_and_closes() {
+        let mut app = App::new();
+        app.wheel = true;
+        // Route a '3' through the key handler: authors, and closed.
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Char('3'),
+        ));
+        assert!(!app.wheel);
+        assert_eq!(app.regions[0].content, ContentKind::Authors);
     }
 }

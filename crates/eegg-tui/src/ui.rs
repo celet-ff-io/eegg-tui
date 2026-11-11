@@ -18,7 +18,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, CardFlow, ComposeMode, Pane, ProfileTab, anchor_of, preview_bytes, short_hex,
+    App, CardFlow, ComposeMode, ContentKind, Focus, anchor_of, preview_bytes, short_hex,
 };
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -34,14 +34,6 @@ pub fn init_terminal() -> miette::Result<Term> {
 pub fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-}
-
-fn focus_color(app: &App, pane: Pane) -> Color {
-    if app.focus == pane {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    }
 }
 
 pub fn render(app: &mut App, f: &mut Frame) {
@@ -60,26 +52,22 @@ pub fn render(app: &mut App, f: &mut Frame) {
         Constraint::Length(hint_lines.len() as u16),
     ])
     .areas(f.area());
-    let [threads, transcript] =
+    // The two regions: region 1 is the narrow side, region 2 the
+    // wide main (the later layout engine makes the split movable).
+    let [r0, r1] =
         Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).areas(main);
 
     render_status(app, f, status);
-    render_threads(app, f, threads);
-    // The composer is the transcript's SUB-WINDOW: it lives INSIDE
-    // the transcript pane (open = the pane splits into the 日 shape:
-    // the log above, the compose below).
-    if app.show_compose {
-        let rows = app.draft.lines().len().clamp(1, 8) as u16;
-        let [t_area, c_area] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(rows + 3)]).areas(transcript);
-        render_transcript(app, f, t_area);
-        render_compose(app, f, c_area);
-    } else {
-        render_transcript(app, f, transcript);
-    }
+    render_region(app, f, 0, r0);
+    render_region(app, f, 1, r1);
     render_keybar(f, keybar, &hint_lines, &version);
-    if app.show_peers {
-        render_peers_popup(app, f);
+    if app.wheel {
+        let focused = match app.focus {
+            Focus::Region(i) => i.min(app.regions.len() - 1),
+            Focus::Compose => app.compose_host.min(app.regions.len() - 1),
+        };
+        let area = if focused == 0 { r0 } else { r1 };
+        render_wheel(app, f, area);
     }
     if app.show_log {
         render_log_popup(app, f);
@@ -90,6 +78,69 @@ pub fn render(app: &mut App, f: &mut Frame) {
     if app.file_box != crate::app::FileBox::None {
         render_file_box(app, f);
     }
+}
+
+/// One region: its content, or the composer's 日 split when THIS
+/// region hosts an open composer (the composer is the transcript's
+/// sub-window — the log above, the compose below).
+fn render_region(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
+    if app.show_compose
+        && app.compose_host == i
+        && app.regions[i].content == ContentKind::Transcript
+    {
+        let rows = app.draft.lines().len().clamp(1, 8) as u16;
+        let [t_area, c_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(rows + 3)]).areas(area);
+        render_transcript(app, f, i, t_area);
+        render_compose(app, f, c_area);
+        return;
+    }
+    match app.regions[i].content {
+        ContentKind::Threads => render_threads(app, f, i, area),
+        ContentKind::Transcript => render_transcript(app, f, i, area),
+        ContentKind::Authors => render_authors(app, f, i, area),
+        ContentKind::Mailboxes => render_mailboxes(app, f, i, area),
+    }
+}
+
+/// A region border's color: yellow when the focus is here, dark
+/// gray otherwise.
+fn region_border(app: &App, i: usize) -> Color {
+    if app.focus == Focus::Region(i) {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    }
+}
+
+/// The wheel: the in-place content menu, drawn over the focused
+/// region's own area (the rest of the screen stays visible). The
+/// current content is marked — selecting it just closes.
+fn render_wheel(app: &App, f: &mut Frame, region_area: ratatui::prelude::Rect) {
+    let current = app.regions[match app.focus {
+        Focus::Region(i) => i.min(app.regions.len() - 1),
+        Focus::Compose => app.compose_host.min(app.regions.len() - 1),
+    }]
+    .content;
+    let lines: Vec<Line> = (0..4)
+        .map(|n| {
+            let kind = ContentKind::nth(n);
+            let mark = if kind == current { "\u{25cf} " } else { "  " };
+            Line::from(vec![
+                Span::from(format!(" {mark}{}", n + 1)).yellow().bold(),
+                Span::from(format!(" {}", kind.title())).cyan(),
+            ])
+        })
+        .collect();
+    let area = centered(region_area, 40, 8);
+    f.render_widget(Clear, area);
+    Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(" wheel \u{00b7} 1-4 content \u{00b7} Esc/o close ")
+                .border_style(Color::Magenta),
+        )
+        .render(area, f.buffer_mut());
 }
 
 /// The MAIN-window file-path box: what Enter will write/read is set
@@ -137,25 +188,31 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 53] = [
+    let rows: [(bool, &str, &str); 57] = [
         (false, "global", ""),
         (
             true,
             "<ctrl+hjkl>",
-            "navigate from anywhere: h = threads · j = next · k = previous · l = transcript",
+            "navigate from anywhere: h = region 1 · l = region 2 · j = next · k = previous",
         ),
         (
             true,
-            "h/j/k/l",
-            "the same directions — except where the focused content uses the key (the lists scroll, the composer types)",
+            "h / l",
+            "the same left/right moves (plain keys — the lists and the composer keep what they use)",
         ),
-        (
-            true,
-            "Tab",
-            "next pane (threads \u{2192} transcript \u{2192} compose)",
-        ),
+        (true, "Tab", "cycle focus (regions, then the composer)"),
+        (true, "1 / 2", "jump straight to region 1 / 2"),
+        (true, "o", "the wheel: switch this region's content"),
+        (true, "p", "show the mailboxes here"),
         (true, "L", "core log popup (the core's stderr ring)"),
         (true, "q", "quit"),
+        (false, "wheel", ""),
+        (
+            true,
+            "1..4",
+            "switch this region's content (the current one just closes)",
+        ),
+        (true, "Esc / o", "close, no change"),
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -193,20 +250,22 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "<ctrl+v>", "paste the clipboard at the caret"),
         (true, "<ctrl+r>", "load the compose text from a file"),
         (true, "<ctrl+s>", "save the compose text to a file"),
-        (true, "Esc", "typing → moving; again = hide the composer"),
+        (
+            true,
+            "Esc",
+            "typing \u{2192} moving; again = hide the composer",
+        ),
         (
             true,
             "hjkl (moving)",
             "navigate while the composer is in the moving mode",
         ),
         (true, "i (moving)", "back to typing"),
-        (false, "profile", ""),
-        (true, "p", "open the profile popup"),
-        (true, "Tab", "flip mailboxes \u{2194} authors"),
+        (false, "mailboxes", ""),
         (
             true,
             "+ record",
-            "the card's third key (record signing); · no record key = a legacy card — re-exchange it",
+            "the card's third key (record signing); \u{00b7} no record key = a legacy card — re-exchange it",
         ),
         (
             true,
@@ -214,11 +273,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "copy the selected card (a mailbox or a rostered author)",
         ),
         (true, "s", "save the selected card to a file"),
-        (true, "a", "add the counterpart's card (mailboxes tab)"),
+        (true, "a", "add the counterpart's card"),
         (true, "<ctrl+v>", "paste the card from the clipboard"),
         (true, "<ctrl+r>", "load the card from a file"),
         (true, "j / k \u{2191}\u{2193}", "move the selection"),
-        (true, "Esc", "back a level / close the popup"),
+        (true, "Esc", "back a level / cancel the flow"),
         (false, "authors", ""),
         (
             true,
@@ -313,11 +372,9 @@ fn render_log_popup(app: &App, f: &mut Frame) {
         .render(area, f.buffer_mut());
 }
 
-/// The profile popup: two domains on two tabs (Tab flips). The
-/// MAILBOXES tab: the core's own card on top (copy source), the
-/// send-target set in the middle, the card/file box at the bottom.
-/// The AUTHORS tab: the sender identities the received messages
-/// have shown, verified vs observed.
+/// The MAILBOXES region content: the core's own card on top (the
+/// copy source), the send-target set in the middle, the card/file
+/// flow box at the bottom when one is active.
 /// One peers-list row: the addressing anchor (the signing key's
 /// fingerprint — the same form row authors are shown by), the key
 /// set (sign + DH + record — a LEGACY card lacks the third key,
@@ -333,7 +390,7 @@ fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
         Some(k) if !k.is_empty() => {
             line.push(Span::from(" + record").dark_gray());
         }
-        _ => line.push(Span::from("  · no record key").red()),
+        _ => line.push(Span::from("  \u{00b7} no record key").red()),
     }
     if !p.endpoints.is_empty() {
         line.push(Span::from(format!("  {}", p.endpoints.join(" "))));
@@ -341,20 +398,15 @@ fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
     ListItem::from(Line::from(line))
 }
 
-fn render_peers_popup(app: &mut App, f: &mut Frame) {
-    let area = centered(f.area(), 70, 60);
-    f.render_widget(Clear, area);
-    if app.profile_tab == ProfileTab::Authors {
-        return render_authors_tab(app, f, area);
-    }
+fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
+    let flow = matches!(
+        app.card_flow,
+        CardFlow::InputCard | CardFlow::ReadCard | CardFlow::SaveCard
+    );
     let [card, list, input] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
-        Constraint::Length(if app.card_flow != CardFlow::None {
-            3
-        } else {
-            0
-        }),
+        Constraint::Length(if flow { 3 } else { 0 }),
     ])
     .areas(area);
 
@@ -372,7 +424,14 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
     };
     Paragraph::new(Line::from(Span::from(shown).cyan()))
         .wrap(ratatui::widgets::Wrap { trim: false })
-        .block(Block::bordered().title(" my card — j/k selects (me) or a peer · c copy · s save "))
+        .block(
+            Block::bordered()
+                .title(format!(
+                    " {} my card — j/k selects (me) or a peer \u{00b7} c copy \u{00b7} s save ",
+                    i + 1
+                ))
+                .border_style(region_border(app, i)),
+        )
         .render(card, f.buffer_mut());
 
     // The selection spans me + the peer set: row 0 = me (decoded
@@ -393,12 +452,17 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
         .block(
             Block::bordered()
                 .title(format!(" peers ({}) ", app.peers.len()))
-                .border_style(Color::Yellow),
+                .border_style(region_border(app, i)),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    ratatui::widgets::StatefulWidget::render(&list_w, list, f.buffer_mut(), &mut app.peers_sel);
+    ratatui::widgets::StatefulWidget::render(
+        &list_w,
+        list,
+        f.buffer_mut(),
+        &mut app.regions[i].mailboxes_sel,
+    );
 
-    if app.card_flow != CardFlow::None {
+    if flow {
         let (title, prefix, value, caret_col) = match app.card_flow {
             // A card is one long base64 line: the visible window
             // follows the caret (horizontal scroll), otherwise the
@@ -416,7 +480,7 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
                     .collect();
                 let caret = app.peer_input.visual_cursor() - scroll;
                 (
-                    " add peer: Enter submit · Ctrl-V clipboard · Ctrl-R file · Esc cancel ",
+                    " add peer: Enter submit \u{00b7} Ctrl-V clipboard \u{00b7} Ctrl-R file \u{00b7} Esc cancel ",
                     prefix,
                     visible,
                     caret as u16,
@@ -435,7 +499,7 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
                     .collect();
                 let caret = app.file_input.visual_cursor() - scroll;
                 (
-                    " read card from file: Enter load · Esc back ",
+                    " read card from file: Enter load \u{00b7} Esc back ",
                     prefix,
                     visible,
                     caret as u16,
@@ -454,14 +518,13 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
                     .collect();
                 let caret = app.file_input.visual_cursor() - scroll;
                 (
-                    " save the selected card to file (~/ expands): Enter save · Esc back ",
+                    " save the selected card to file (~/ expands): Enter save \u{00b7} Esc back ",
                     prefix,
                     visible,
                     caret as u16,
                 )
             }
-            CardFlow::None => unreachable!("checked above"),
-            CardFlow::InputRemark => unreachable!("the authors tab renders its own remark box"),
+            CardFlow::None | CardFlow::InputRemark => unreachable!("checked above"),
         };
         Paragraph::new(Line::from(vec![
             Span::from(prefix).yellow(),
@@ -470,6 +533,102 @@ fn render_peers_popup(app: &mut App, f: &mut Frame) {
         .block(Block::bordered().title(title))
         .render(input, f.buffer_mut());
         f.set_cursor_position((input.x + 1 + prefix.len() as u16 + caret_col, input.y + 1));
+    }
+}
+
+/// The AUTHORS region content: every sender identity the session
+/// observed — ✍ = its record signature was rostered (objective
+/// authorship, verified by the core); · = seen on an envelope only.
+/// Each row shows the identity's local remark (the key fingerprint
+/// only as the fallback), cross-referenced with the book.
+fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
+    // The remark input box sits at the region's bottom edge.
+    let [list, input] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(if app.card_flow == CardFlow::InputRemark {
+            3
+        } else {
+            0
+        }),
+    ])
+    .areas(area);
+    let items: Vec<ListItem> = app
+        .authors
+        .iter()
+        .map(|(a, entry)| {
+            let in_book = app.peers.iter().any(|p| &anchor_of(p) == a);
+            let fallback = short_hex(a);
+            let shown = entry
+                .remark
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .unwrap_or(fallback.as_str());
+            let mut line = vec![
+                Span::from(if entry.verified {
+                    " \u{270d} "
+                } else {
+                    " \u{00b7} "
+                })
+                .style(if entry.verified {
+                    Style::default().fg(Color::Magenta)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+                Span::from(shown.to_owned()).cyan(),
+                Span::from(if in_book {
+                    "  = book"
+                } else {
+                    "  not in the book"
+                })
+                .dark_gray(),
+            ];
+            if entry.verified && !in_book {
+                // Theoretically unreachable (verification rides a
+                // mailbox's card) — belt and braces for a drift.
+                line[2] = Span::from("  ?? verified w/o card").red();
+            }
+            ListItem::from(Line::from(line))
+        })
+        .collect();
+    let list_w = List::new(items)
+        .block(
+            Block::bordered()
+                .title(format!(" {} authors ({}) ", i + 1, app.authors.len()))
+                .border_style(region_border(app, i)),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    ratatui::widgets::StatefulWidget::render(
+        &list_w,
+        list,
+        f.buffer_mut(),
+        &mut app.regions[i].authors_sel,
+    );
+    if app.card_flow == CardFlow::InputRemark {
+        let prefix = "remark> ";
+        let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+        let scroll = app.remark_input.visual_scroll(text_width);
+        let visible: String = app
+            .remark_input
+            .value()
+            .chars()
+            .skip(scroll)
+            .take(text_width)
+            .collect();
+        let caret = app.remark_input.visual_cursor() - scroll;
+        Paragraph::new(Line::from(vec![
+            Span::from(prefix).yellow(),
+            Span::from(visible),
+        ]))
+        .block(
+            Block::bordered().title(
+                " set the selected identity's remark: Enter set \u{00b7} Ctrl-V paste \u{00b7} Esc cancel ",
+            ),
+        )
+        .render(input, f.buffer_mut());
+        f.set_cursor_position((
+            input.x + 1 + prefix.len() as u16 + caret as u16,
+            input.y + 1,
+        ));
     }
 }
 
@@ -529,7 +688,7 @@ fn render_status(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     .render(area, f.buffer_mut());
 }
 
-fn render_threads(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
+fn render_threads(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
     let items: Vec<ListItem> = app
         .threads
         .iter()
@@ -538,14 +697,19 @@ fn render_threads(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let list = List::new(items)
         .block(
             Block::bordered()
-                .title(" threads ")
-                .border_style(focus_color(app, Pane::Threads)),
+                .title(format!(" {} {} ", i + 1, ContentKind::Threads.title()))
+                .border_style(region_border(app, i)),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.thread_sel);
+    ratatui::widgets::StatefulWidget::render(
+        &list,
+        area,
+        f.buffer_mut(),
+        &mut app.regions[i].threads_sel,
+    );
 }
 
-fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
+fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
     let items: Vec<ListItem> = app
         .entries
         .iter()
@@ -578,14 +742,19 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
     let list = List::new(items)
         .block(
             Block::bordered()
-                .title(" transcript ")
-                .border_style(focus_color(app, Pane::Transcript)),
+                .title(format!(" {} {} ", i + 1, ContentKind::Transcript.title()))
+                .border_style(region_border(app, i)),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     // The viewport height feeds the PgUp/PgDn page (the page is what
-    // the terminal actually showed at the last paint).
-    app.viewport_rows = area.height.saturating_sub(2);
-    ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.transcript_sel);
+    // the terminal actually showed at the last paint) — per region.
+    app.regions[i].page_rows = area.height.saturating_sub(2);
+    ratatui::widgets::StatefulWidget::render(
+        &list,
+        area,
+        f.buffer_mut(),
+        &mut app.regions[i].transcript_sel,
+    );
 }
 
 fn entry_item(
@@ -656,102 +825,6 @@ fn entry_item(
     ListItem::from(Line::from(line))
 }
 
-/// The AUTHORS tab of the profile popup: every sender identity the
-/// session observed — ✍ = its record signature was rostered
-/// (objective authorship, verified by the core); · = seen on an
-/// envelope only. Each row shows the identity's local remark (the
-/// key fingerprint only as the fallback), cross-referenced with
-/// the book.
-fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
-    // The remark input box shares the popup's bottom-edge pattern
-    // with the mailbox tab's card flows.
-    let [list, input] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(if app.card_flow == CardFlow::InputRemark {
-            3
-        } else {
-            0
-        }),
-    ])
-    .areas(area);
-    let items: Vec<ListItem> = app
-        .authors
-        .iter()
-        .map(|(a, entry)| {
-            let in_book = app.peers.iter().any(|p| &anchor_of(p) == a);
-            let fallback = short_hex(a);
-            let shown = entry
-                .remark
-                .as_deref()
-                .filter(|r| !r.is_empty())
-                .unwrap_or(fallback.as_str());
-            let mut line = vec![
-                Span::from(if entry.verified {
-                    " \u{270d} "
-                } else {
-                    " \u{00b7} "
-                })
-                .style(if entry.verified {
-                    Style::default().fg(Color::Magenta)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                }),
-                Span::from(shown.to_owned()).cyan(),
-                Span::from(if in_book {
-                    "  = book"
-                } else {
-                    "  not in the book"
-                })
-                .dark_gray(),
-            ];
-            if entry.verified && !in_book {
-                // Theoretically unreachable (verification rides a
-                // mailbox's card) — belt and braces for a drift.
-                line[2] = Span::from("  ?? verified w/o card").red();
-            }
-            ListItem::from(Line::from(line))
-        })
-        .collect();
-    let list_w = List::new(items)
-        .block(
-            Block::bordered()
-                .title(format!(
-                    " authors ({}) — Tab flips to mailboxes ",
-                    app.authors.len()
-                ))
-                .border_style(Color::Yellow),
-        )
-        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    ratatui::widgets::StatefulWidget::render(&list_w, list, f.buffer_mut(), &mut app.authors_sel);
-    if app.card_flow == CardFlow::InputRemark {
-        let prefix = "remark> ";
-        let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
-        let scroll = app.remark_input.visual_scroll(text_width);
-        let visible: String = app
-            .remark_input
-            .value()
-            .chars()
-            .skip(scroll)
-            .take(text_width)
-            .collect();
-        let caret = app.remark_input.visual_cursor() - scroll;
-        Paragraph::new(Line::from(vec![
-            Span::from(prefix).yellow(),
-            Span::from(visible),
-        ]))
-        .block(
-            Block::bordered().title(
-                " set the selected identity's remark: Enter set · Ctrl-V paste · Esc cancel ",
-            ),
-        )
-        .render(input, f.buffer_mut());
-        f.set_cursor_position((
-            input.x + 1 + prefix.len() as u16 + caret as u16,
-            input.y + 1,
-        ));
-    }
-}
-
 fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     if area.height == 0 {
         return;
@@ -770,8 +843,10 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     // title, so the double-Esc (leave → hide) is never a surprise.
     let (title, border) = if app.compose_mode == ComposeMode::Nav {
         (" compose ·nav· ", Color::Cyan)
+    } else if app.focus == Focus::Compose {
+        (" compose ", Color::Yellow)
     } else {
-        (" compose ", focus_color(app, Pane::Compose))
+        (" compose ", Color::DarkGray)
     };
     let block = Block::bordered().title(title).border_style(border);
     let inner = block.inner(area);
@@ -781,7 +856,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(inner);
     let width = text_a.width as usize;
     let lines = app.draft.lines();
-    if app.focus == Pane::Compose && app.compose_mode == ComposeMode::Input {
+    if app.focus == Focus::Compose && app.compose_mode == ComposeMode::Input {
         // The caret rides a following viewport: vertical scroll keeps
         // the caret's row on screen; the caret's row also scrolls
         // horizontally when it runs past the width.
@@ -814,7 +889,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         // Unfocused = dimmed; focused-but-moving = normal color (the
         // face swap is already visible on the border/title). The
         // window still follows the caret row when focused.
-        let dim = app.focus != Pane::Compose;
+        let dim = app.focus != Focus::Compose;
         let top = if dim {
             0
         } else {
@@ -838,20 +913,34 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 }
 
 fn keybar_hints(app: &App) -> &'static str {
-    match (app.focus, app.compose_mode) {
-        (Pane::Threads, _) => {
-            "<ctrl+hjkl> navigate \u{00b7} t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
+    // The wheel is a modal: its own one-line hint.
+    if app.wheel {
+        return "1..4 content · Esc/o close";
+    }
+    if app.focus == Focus::Compose {
+        return match app.compose_mode {
+            // Typing mode: the editor face.
+            ComposeMode::Input => {
+                "<ctrl+enter>/<alt+enter> send · <ctrl+w> drop word · <ctrl+u> clear · <ctrl+v> paste · <ctrl+c> copy · <ctrl+r>/<ctrl+s> file · Esc leave"
+            }
+            // Moving mode: plain hjkl navigates (the content layer is
+            // free here); i returns to typing; Esc hides the composer.
+            ComposeMode::Nav => "hjkl navigate · i type · Esc hide",
+        };
+    }
+    match app.regions[app.focus_region()].content {
+        ContentKind::Threads => {
+            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · t refresh · n new thread · Enter open · j/k move · o wheel · L log · ? help · q quit"
         }
-        (Pane::Transcript, _) => {
-            "<ctrl+hjkl> navigate \u{00b7} j/k scroll \u{00b7} PgUp/PgDn page \u{00b7} n new thread \u{00b7} i compose \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
+        ContentKind::Transcript => {
+            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · o wheel · L log · ? help · q quit"
         }
-        // Typing mode: the editor face.
-        (Pane::Compose, ComposeMode::Input) => {
-            "<ctrl+enter>/<alt+enter> send \u{00b7} <ctrl+w> drop word \u{00b7} <ctrl+u> clear \u{00b7} <ctrl+v> paste \u{00b7} <ctrl+c> copy \u{00b7} <ctrl+r>/<ctrl+s> file \u{00b7} Esc leave"
+        ContentKind::Authors => {
+            "r remark · R clear remark · c copy card · s save card · j/k move · Tab cycle · o wheel · L log · ? help · q quit"
         }
-        // Moving mode: plain hjkl navigates (the content layer is
-        // free here); i returns to typing; Esc hides the composer.
-        (Pane::Compose, ComposeMode::Nav) => "hjkl navigate \u{00b7} i type \u{00b7} Esc hide",
+        ContentKind::Mailboxes => {
+            "a add card · c copy card · s save card · j/k move · Tab cycle · o wheel · L log · ? help · q quit"
+        }
     }
 }
 
@@ -1014,4 +1103,3 @@ mod tests {
         assert!(line_width(&lines[1]) + 6 <= 20);
     }
 }
-

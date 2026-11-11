@@ -23,13 +23,13 @@ use clap::{
 use clap_verbosity_flag::{Verbosity, WarnLevel};
 use prost::Message;
 use protobuf_varint_deframer::Deframer;
+use zconned_crypto::Fingerprint;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, ResourceRef, Value, resource_digest};
 use zconned_stdio_types::{
     Handshake, IdentitiesGet, IdentitiesPush, Identity, IdentityRemarkReset, IdentityRemarkSet,
     IncomingFrame, Local, MsgPackage, OutgoingFrame, PROTOCOL_VERSION, incoming_frame::Method,
     outgoing_frame::Frame as Out,
 };
-use zconned_crypto::Fingerprint;
 
 static STYLES: Styles = Styles::styled()
     .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))

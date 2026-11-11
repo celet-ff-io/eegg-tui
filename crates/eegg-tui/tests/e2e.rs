@@ -206,35 +206,40 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     a.send(Method::MsgDraftCommit(
         zconned_stdio_types::MsgDraftCommit {},
     ));
-    a.wait_for("commit receipt (a)", Duration::from_secs(10), |f| {
-        matches!(f, Out::MsgPackagePush(_))
-    });
-
-    // The signature plane rides the package: the core auto-self-signs
-    // every sent row, so the commit receipt's package states the self
-    // anchor in its roster.
+    // The commit receipt IS the package (the self signature lands
+    // with the msg — the roster is assembled complete), so one wait
+    // covers both: the frame and the roster stating the self anchor.
     let a_anchor = anchor_of(&peer_from_card(&card_a).expect("a's card decodes"));
-    println!("e2e: commit receipt (package) received on a");
+    a.wait_for(
+        "the commit receipt package with the self roster (a)",
+        Duration::from_secs(10),
+        |f| matches!(f, Out::MsgPackagePush(p)
+            if p.package.as_ref().and_then(|pkg| pkg.local.as_ref())
+                .is_some_and(|l| l.signer.iter().any(|s| s.anchor == a_anchor))),
+    );
+    println!("e2e: commit receipt (package) with the self roster received on a");
 
-    // The message lands on B: the arrival is the package push itself,
-    // and its roster states A's anchor — the full conjunction the
-    // display builds on (author + roster) rides one frame.
-    let pkg = b.wait_for("the arrival on b", Duration::from_secs(30), |f| {
-        matches!(f, Out::MsgPackagePush(_))
-    });
-    println!("e2e: arrival landed on b");
-    match pkg {
-        Out::MsgPackagePush(p) => {
-            let rostered = p
-                .package
-                .as_ref()
-                .and_then(|pkg| pkg.local.as_ref())
-                .is_some_and(|l| l.signer.iter().any(|s| s.anchor == a_anchor));
-            assert!(rostered, "b's package roster must state a's anchor");
-            println!("e2e: b's package roster states a's anchor");
-        }
+    // The message lands on B: the arrival is the package push itself.
+    // The roster may lag the msg (the push at land states the roster
+    // AS IT STANDS — the sig mail may land after) — wait for the
+    // roster-driven re-push that states A's anchor.
+    let pkg = b.wait_for(
+        "the arrival package with a's anchor on b",
+        Duration::from_secs(30),
+        |f| matches!(f, Out::MsgPackagePush(p)
+            if p.package.as_ref().and_then(|pkg| pkg.local.as_ref())
+                .is_some_and(|l| l.signer.iter().any(|s| s.anchor == a_anchor))),
+    );
+    println!("e2e: arrival landed on b (roster states a's anchor)");
+    let thread_ref = match pkg {
+        Out::MsgPackagePush(p) => p
+            .package
+            .as_ref()
+            .and_then(|pkg| pkg.entry.as_ref())
+            .and_then(|e| e.prev.first().cloned())
+            .expect("the arrival's thread ref"),
         _ => unreachable!(),
-    }
+    };
 
     // The receipt frontier comes back to A (ack = received, never
     // read). Zero-frontier statements exist (the counterpart's
@@ -253,6 +258,67 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
         }
         _ => unreachable!(),
     }
+
+    // The registry face: b remarks a's identity; the ok receipt = the
+    // fresh registry (dual-role); the log re-fetch carries the fresh
+    // remark (no echo — the writer re-fetches); an empty remark
+    // answers remark_required; an unobserved anchor answers
+    // unknown_author.
+    b.send(Method::IdentityRemarkSet(
+        zconned_stdio_types::IdentityRemarkSet {
+            anchor: a_anchor.clone(),
+            remark: "the counterpart".into(),
+        },
+    ));
+    b.wait_for("the remark receipt (b)", Duration::from_secs(10), |f| {
+        matches!(f, Out::IdentitiesPush(p)
+            if p.identities.iter().any(|i| {
+                i.anchor == a_anchor && i.remark.as_deref() == Some("the counterpart")
+            }))
+    });
+    println!("e2e: remark set; the registry receipt states it");
+
+    b.send(Method::IdentitiesGet(zconned_stdio_types::IdentitiesGet {}));
+    b.wait_for("the registry answer (b)", Duration::from_secs(10), |f| {
+        matches!(f, Out::IdentitiesPush(p)
+            if p.identities.iter().any(|i| i.anchor == a_anchor))
+    });
+    println!("e2e: identities_get answers the derived anchor set");
+
+    b.send(Method::MsgThreadsLogGet(zconned_stdio_types::MsgThreadsLogGet {
+        thread: Some(thread_ref),
+    }));
+    b.wait_for("the log re-fetch with the remark", Duration::from_secs(10), |f| {
+        matches!(f, Out::MsgThreadsLogPush(p)
+            if p.packages.iter().any(|pkg| {
+                pkg.local.as_ref().is_some_and(|l| {
+                    l.remark.as_deref() == Some("the counterpart")
+                })
+            }))
+    });
+    println!("e2e: the log re-fetch carries the fresh remark");
+
+    b.send(Method::IdentityRemarkSet(
+        zconned_stdio_types::IdentityRemarkSet {
+            anchor: a_anchor.clone(),
+            remark: String::new(),
+        },
+    ));
+    b.wait_for("remark_required", Duration::from_secs(10), |f| {
+        matches!(f, Out::Error(e) if e.code == "remark_required")
+    });
+    println!("e2e: an empty remark answers remark_required");
+
+    b.send(Method::IdentityRemarkSet(
+        zconned_stdio_types::IdentityRemarkSet {
+            anchor: vec![0xaa; 32],
+            remark: "nobody".into(),
+        },
+    ));
+    b.wait_for("unknown_author", Duration::from_secs(10), |f| {
+        matches!(f, Out::Error(e) if e.code == "unknown_author")
+    });
+    println!("e2e: an unobserved anchor answers unknown_author");
 
     // Teardown: EOF each core (the standing relay session dies with
     // the core — no half-close ceremony).

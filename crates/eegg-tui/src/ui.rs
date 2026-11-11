@@ -514,8 +514,8 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
             // shown INSTEAD of the key fingerprint when stated.
             let from = e.meta.as_ref().map(|m| m.from.clone()).unwrap_or_default();
             let overlay = app.locals.get(&digest);
-            let confirmed = !from.is_empty()
-                && overlay.is_some_and(|o| o.signers.iter().any(|a| a == &from));
+            let confirmed =
+                !from.is_empty() && overlay.is_some_and(|o| o.signers.iter().any(|a| a == &from));
             let fallback = short_hex(&from);
             let author = (!from.is_empty()).then(|| {
                 overlay
@@ -688,11 +688,16 @@ fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect
             Span::from(prefix).yellow(),
             Span::from(visible),
         ]))
-        .block(Block::bordered().title(
-            " set the selected identity's remark: Enter set · Ctrl-V paste · Esc cancel ",
-        ))
+        .block(
+            Block::bordered().title(
+                " set the selected identity's remark: Enter set · Ctrl-V paste · Esc cancel ",
+            ),
+        )
         .render(input, f.buffer_mut());
-        f.set_cursor_position((input.x + 1 + prefix.len() as u16 + caret as u16, input.y + 1));
+        f.set_cursor_position((
+            input.x + 1 + prefix.len() as u16 + caret as u16,
+            input.y + 1,
+        ));
     }
 }
 

@@ -1104,7 +1104,11 @@ impl App {
                         let entry = pkg.entry?;
                         let overlay = pkg.local.unwrap_or_default();
                         let digest = entry.meta.as_ref()?.digest.clone();
-                        let from = entry.meta.as_ref().map(|m| m.from.clone()).unwrap_or_default();
+                        let from = entry
+                            .meta
+                            .as_ref()
+                            .map(|m| m.from.clone())
+                            .unwrap_or_default();
                         self.harvest_author(&from, false);
                         for s in &overlay.signer {
                             self.harvest_author(&s.anchor, true);
@@ -1228,11 +1232,7 @@ impl App {
         let Some(e) = pkg.entry else { return };
         let overlay = pkg.local.unwrap_or_default();
         let digest = e.meta.as_ref().map(|m| m.digest.clone());
-        let from = e
-            .meta
-            .as_ref()
-            .map(|m| m.from.clone())
-            .unwrap_or_default();
+        let from = e.meta.as_ref().map(|m| m.from.clone()).unwrap_or_default();
 
         // The AUTHOR registry: the envelope anchor is an OBSERVATION
         // until a roster mention states it (verified is a one-way

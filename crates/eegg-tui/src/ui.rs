@@ -59,13 +59,13 @@ pub fn render(app: &mut App, f: &mut Frame) {
     render_region(app, f, 0, r0);
     render_region(app, f, 1, r1);
     render_keybar(f, keybar, &hint_lines, &version);
-    if app.wheel {
+    if app.mode_menu {
         let focused = match app.focus {
             Focus::Region(i) => i.min(app.regions.len() - 1),
             Focus::Compose => app.compose_host.min(app.regions.len() - 1),
         };
         let area = if focused == 0 { r0 } else { r1 };
-        render_wheel(app, f, area);
+        render_mode_menu(app, f, area);
     }
     if app.show_log {
         render_log_popup(app, f);
@@ -108,10 +108,10 @@ fn rule(width: usize, label: &str) -> Span<'static> {
     Span::from(format!("{:-^width$}", label)).dark_gray()
 }
 
-/// The wheel: the in-place content menu, drawn over the focused
+/// The mode: the in-place content menu, drawn over the focused
 /// region's own area (the rest of the screen stays visible). The
 /// current content is marked — selecting it just closes.
-fn render_wheel(app: &App, f: &mut Frame, region_area: ratatui::prelude::Rect) {
+fn render_mode_menu(app: &App, f: &mut Frame, region_area: ratatui::prelude::Rect) {
     let current = app.regions[match app.focus {
         Focus::Region(i) => i.min(app.regions.len() - 1),
         Focus::Compose => app.compose_host.min(app.regions.len() - 1),
@@ -132,7 +132,7 @@ fn render_wheel(app: &App, f: &mut Frame, region_area: ratatui::prelude::Rect) {
     Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(" wheel \u{00b7} 1-4 content \u{00b7} Esc/m close ")
+                .title(" mode \u{00b7} 1-4 content \u{00b7} Esc/m close ")
                 .border_style(Color::Magenta),
         )
         .render(area, f.buffer_mut());
@@ -196,11 +196,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "the same left/right moves (plain keys — the lists and the composer keep what they use)",
         ),
         (true, "Tab", "cycle focus between the regions"),
-        (true, "m", "the wheel: switch this region's content"),
+        (true, "m", "open the mode: switch this region's content"),
         (true, "p", "show the mailboxes here"),
         (true, "L", "core log popup (the core's stderr ring)"),
         (true, "q", "quit"),
-        (false, "wheel", ""),
+        (false, "mode", ""),
         (
             true,
             "1..4",
@@ -896,8 +896,8 @@ fn render_compose_body(
 }
 
 fn keybar_hints(app: &App) -> &'static str {
-    // The wheel is a modal: its own one-line hint.
-    if app.wheel {
+    // The mode is a modal: its own one-line hint.
+    if app.mode_menu {
         return "1..4 content · Esc/m close";
     }
     // Typing: the editor face. (Standby shows the focused content's
@@ -907,16 +907,16 @@ fn keybar_hints(app: &App) -> &'static str {
     }
     match app.regions[app.focus_region()].content {
         ContentKind::Threads => {
-            "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter open · j/k move · m mode · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
-            "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m mode · L log · ? help · q quit"
         }
         ContentKind::Authors => {
-            "r remark · R clear remark · c copy card · s save card · j/k move · m wheel · L log · ? help · q quit"
+            "r remark · R clear remark · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"
         }
         ContentKind::Mailboxes => {
-            "a add card · c copy card · s save card · j/k move · m wheel · L log · ? help · q quit"
+            "a add card · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"
         }
     }
 }

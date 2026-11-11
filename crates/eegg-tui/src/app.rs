@@ -48,7 +48,7 @@ pub enum FileBox {
     SaveTranscript,
 }
 
-/// The content a region can hold — the wheel's 1..4 menu.
+/// The content a region can hold — the mode's 1..4 menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentKind {
     Threads,
@@ -68,7 +68,7 @@ impl ContentKind {
         }
     }
 
-    /// The wheel order (1..4).
+    /// The mode order (1..4).
     pub fn nth(n: usize) -> ContentKind {
         [
             ContentKind::Threads,
@@ -136,9 +136,9 @@ pub struct App {
     /// The composer renders inside its HOST region's transcript —
     /// fixed at summon time.
     pub compose_host: usize,
-    /// The wheel: the in-place content menu over the focused region
+    /// The mode: the in-place content menu over the focused region
     /// (a modal — it eats every key until closed).
-    pub wheel: bool,
+    pub mode_menu: bool,
     pub threads: Vec<MsgRef>,
     pub entries: Vec<Entry>,
     /// The thread whose log the transcript currently shows (the reply
@@ -313,7 +313,7 @@ impl App {
                 Viewport::new(ContentKind::Transcript),
             ],
             compose_host: 1,
-            wheel: false,
+            mode_menu: false,
             threads: Vec::new(),
             entries: Vec::new(),
             open_thread: None,
@@ -486,7 +486,7 @@ impl App {
             .select(if n > 0 { Some(n - 1) } else { None });
     }
 
-    /// Switch a region's content (the wheel's 1..4, `p`, opening a
+    /// Switch a region's content (the mode's 1..4, `p`, opening a
     /// thread). Switching the composer's host region away from the
     /// transcript collapses the composer — its surface is gone.
     fn set_region_content(&mut self, region: usize, kind: ContentKind) {
@@ -1077,17 +1077,17 @@ impl App {
             return;
         }
 
-        // The wheel: a modal over the focused region — 1..4 picks
+        // The mode: a modal over the focused region — 1..4 picks
         // the content, Esc/m closes without change, the rest is
         // ignored (q is NOT bound: q means quit, everywhere).
-        if self.wheel {
+        if self.mode_menu {
             match key.code {
                 KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
                     let n = c.to_digit(10).expect("checked") as usize - 1;
-                    self.wheel = false;
+                    self.mode_menu = false;
                     self.set_region_content(self.focus_region(), ContentKind::nth(n));
                 }
-                KeyCode::Esc | KeyCode::Char('m') => self.wheel = false,
+                KeyCode::Esc | KeyCode::Char('m') => self.mode_menu = false,
                 _ => {}
             }
             return;
@@ -1148,10 +1148,10 @@ impl App {
             // The numbered regions: the direct jump (no cycling).
             KeyCode::Char('1') => self.nav_to_region(0),
             KeyCode::Char('2') => self.nav_to_region(1),
-            // The wheel: the in-place content menu over this
+            // The mode: the in-place content menu over this
             // region. `o` stays free for the transcript's future
             // open-file key (the multimedia era).
-            KeyCode::Char('m') => self.wheel = true,
+            KeyCode::Char('m') => self.mode_menu = true,
             // The mailboxes, right here: focus stays, the content
             // swaps.
             KeyCode::Char('p') => {
@@ -1711,14 +1711,14 @@ mod tests {
     }
 
     #[test]
-    fn the_wheel_number_selects_and_closes() {
+    fn the_mode_number_selects_and_closes() {
         let mut app = App::new();
-        app.wheel = true;
+        app.mode_menu = true;
         // Route a '3' through the key handler: authors, and closed.
         app.on_key(ratatui::crossterm::event::KeyEvent::from(
             ratatui::crossterm::event::KeyCode::Char('3'),
         ));
-        assert!(!app.wheel);
+        assert!(!app.mode_menu);
         assert_eq!(app.regions[0].content, ContentKind::Authors);
     }
 }

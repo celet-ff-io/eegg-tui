@@ -870,47 +870,75 @@ fn hint_spans(seg: &str) -> Vec<Span<'static>> {
 }
 
 /// The keybar's hint lines, laid out with the right-corner extra
-/// info taken into account: every line reserves the extra's width
-/// plus a gap (`a`); a segment crossing the reserved edge wraps to
-/// the next line (which also means the extra info will not sit on
-/// the wrapped-from line); once on the SECOND line, an overflowing
-/// segment truncates the previous one into "…" and ends the hints —
-/// they never grow past two lines.
+/// info in the budget: a line STARTS reserving the extra's width
+/// plus a gap (`a`); the first segment crossing `x-a` is the WRAP
+/// DECISION - the extra info leaves this line, and the line now
+/// fills to the full `x` (subsequent segments ride it until `x`
+/// itself overflows into the next line, which starts reserved
+/// again). On the SECOND line a crossing of `x-a` ends the hints:
+/// the previous hint becomes an ellipsis and the incoming one is
+/// dropped. If the hints ended on a decided line, its last hint
+/// shrinks into an ellipsis until the extra info fits - it always
+/// rides the last line.
 fn keybar_lines(hints: &str, x: u16, a: u16) -> Vec<Vec<Span<'static>>> {
-    let limit = x.saturating_sub(a);
+    const ELLIPSIS: &str = "\u{2026}";
     let mut lines: Vec<Vec<Span>> = vec![Vec::new()];
+    let mut bounds: Vec<usize> = Vec::new(); // segment starts on the current line
     let mut used: u16 = 0;
-    let mut seg_start: usize = 0; // the last segment's first span index
+    let mut reserved = true;
     for seg in hints.split(" \u{00b7} ") {
         let spans = hint_spans(seg);
         let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-        let sep_w = if used == 0 { 0 } else { 3 }; // " · "
-        if used + sep_w + w > limit {
+        let sep_w = if used == 0 { 0 } else { 3 }; // " \u{00b7} "
+        let mut overflow = used + sep_w + w > x.saturating_sub(a);
+        if overflow && reserved {
+            // The wrap decision: the extra info leaves this line;
+            // the line now fills to the full width - retry against
+            // x before actually wrapping.
+            reserved = false;
+            overflow = used + sep_w + w > x;
+        }
+        if overflow {
             if lines.len() >= 2 {
-                // Second line and still overflowing: the previous
-                // hint becomes "…" and the hints end here.
-                let line = lines.last_mut().expect("the second line exists");
-                line.truncate(seg_start);
-                line.push(Span::styled("\u{2026}".to_owned(), Style::new().dark_gray()));
+                // The second line never fills past its reservation:
+                // the previous hint becomes the ellipsis and the
+                // hints end here.
+                let line = lines.last_mut().expect("the second line");
+                line.truncate(*bounds.last().expect("a placed segment"));
+                line.push(Span::styled(ELLIPSIS.to_owned(), Style::new().dark_gray()));
                 break;
             }
             lines.push(Vec::new());
-            lines.last_mut().expect("just pushed").extend(spans);
-            used = w;
-            seg_start = 0;
-            continue;
+            bounds.clear();
+            used = 0;
+            reserved = true;
         }
         let line = lines.last_mut().expect("the current line");
-        seg_start = line.len();
+        let sep_w = if used == 0 { 0 } else { 3 };
+        bounds.push(line.len());
         if used > 0 {
             line.push(Span::styled(" \u{00b7} ".to_owned(), Style::new().dark_gray()));
         }
         line.extend(spans);
         used += sep_w + w;
     }
+    // The extra info rides the LAST line; if the hints ended on a
+    // decided line (filled past the reservation), the last hint
+    // shrinks into the ellipsis until the extra fits.
+    if !reserved {
+        let line = lines.last_mut().expect("at least one line");
+        loop {
+            let used_now: u16 = line.iter().map(|s| s.width() as u16).sum();
+            if used_now + a <= x || bounds.is_empty() {
+                break;
+            }
+            line.truncate(*bounds.last().expect("a placed segment"));
+            bounds.pop();
+            line.push(Span::styled(ELLIPSIS.to_owned(), Style::new().dark_gray()));
+        }
+    }
     lines
 }
-
 fn render_keybar(
     f: &mut Frame,
     area: ratatui::prelude::Rect,
@@ -929,9 +957,52 @@ fn render_keybar(
             // The right-corner extra info (italic, the color it had)
             // rides the LAST hint line — every line reserved its
             // width plus the gap, so it never covers a hint.
-            Paragraph::new(Span::styled(version.to_owned(), Style::new().dark_gray().italic()))
-                .alignment(Alignment::Right)
-                .render(row, f.buffer_mut());
+            Paragraph::new(Span::styled(
+                version.to_owned(),
+                Style::new().dark_gray().italic(),
+            ))
+            .alignment(Alignment::Right)
+            .render(row, f.buffer_mut());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_width(line: &[Span]) -> u16 {
+        line.iter().map(|s| s.width() as u16).sum()
+    }
+
+    #[test]
+    fn hints_fit_one_line_with_the_extra_reserved() {
+        // Two small segments: one line, and the extra info still fits.
+        let lines = keybar_lines("k one \u{00b7} j two", 40, 6);
+        assert_eq!(lines.len(), 1);
+        assert!(line_width(&lines[0]) + 6 <= 40);
+    }
+
+    #[test]
+    fn the_wrap_decision_fills_the_line_to_the_full_width() {
+        // Two segments land at 15 > x-a=14 but ≤ x=20: the wrap
+        // decision frees the reservation and BOTH stay on one line
+        // (the old always-reserved logic would have wrapped here).
+        let hints = "aaaa 1 \u{00b7} bbbb 2";
+        let lines = keybar_lines(hints, 20, 6);
+        assert_eq!(lines.len(), 1, "the freed a must be reused on the line");
+        assert!(line_width(&lines[0]) + 6 <= 20);
+    }
+
+    #[test]
+    fn the_second_line_truncates_at_its_reservation() {
+        // Enough segments to spill onto line 2: there the first
+        // crossing of x-a turns the previous hint into an ellipsis.
+        let hints = "aaaa 1 \u{00b7} bbbb 2 \u{00b7} cccc 3 \u{00b7} dddd 4 \u{00b7} eeee 5";
+        let lines = keybar_lines(hints, 20, 6);
+        assert_eq!(lines.len(), 2);
+        let last = lines[1].last().expect("the ellipsis").content.as_ref();
+        assert_eq!(last, "\u{2026}");
+        assert!(line_width(&lines[1]) + 6 <= 20);
     }
 }

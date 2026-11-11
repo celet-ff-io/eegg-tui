@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use crate::app::{App, CardFlow, Pane, anchor_of, preview_bytes, short_hex};
+use crate::app::{App, CardFlow, Pane, ProfileTab, anchor_of, preview_bytes, short_hex};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -117,7 +117,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 39] = [
+    let rows: [(bool, &str, &str); 43] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -142,20 +142,36 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "Ctrl-R", "load the compose text from a file"),
         (true, "Ctrl-S", "save the compose text to a file"),
         (true, "Esc", "clear the compose text"),
-        (false, "peers", ""),
-        (true, "p", "open the peers popup"),
+        (false, "profile", ""),
+        (true, "p", "open the profile popup"),
+        (true, "Tab", "flip mailboxes \u{2194} authors"),
         (
             true,
             "+ record",
             "the card's third key (record signing); · no record key = a legacy card — re-exchange it",
         ),
-        (true, "c", "copy the selected card (me or a peer)"),
+        (
+            true,
+            "c",
+            "copy the selected card (a mailbox or a rostered author)",
+        ),
         (true, "s", "save the selected card to a file"),
-        (true, "a", "add the counterpart's card"),
+        (true, "a", "add the counterpart's card (mailboxes tab)"),
         (true, "Ctrl-V", "paste the card from the clipboard"),
         (true, "Ctrl-R", "load the card from a file"),
         (true, "j / k \u{2191}\u{2193}", "move the selection"),
         (true, "Esc", "back a level / close the popup"),
+        (false, "authors", ""),
+        (
+            true,
+            "\u{270d}",
+            "verified authorship (the record signature rostered)",
+        ),
+        (
+            true,
+            "\u{00b7}",
+            "observed on an envelope only (unverified)",
+        ),
         (false, "global", ""),
         (
             true,
@@ -247,8 +263,11 @@ fn render_log_popup(app: &App, f: &mut Frame) {
         .render(area, f.buffer_mut());
 }
 
-/// The peers popup: the core's own card on top (copy source), the
+/// The profile popup: two domains on two tabs (Tab flips). The
+/// MAILBOXES tab: the core's own card on top (copy source), the
 /// send-target set in the middle, the card/file box at the bottom.
+/// The AUTHORS tab: the sender identities the received messages
+/// have shown, verified vs observed.
 /// One peers-list row: the addressing anchor (the signing key's
 /// fingerprint — the same form row authors are shown by), the key
 /// set (sign + DH + record — a LEGACY card lacks the third key,
@@ -275,6 +294,9 @@ fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
 fn render_peers_popup(app: &mut App, f: &mut Frame) {
     let area = centered(f.area(), 70, 60);
     f.render_widget(Clear, area);
+    if app.profile_tab == ProfileTab::Authors {
+        return render_authors_tab(app, f, area);
+    }
     let [card, list, input] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
@@ -572,6 +594,56 @@ fn entry_item(
     ListItem::from(Line::from(line))
 }
 
+/// The AUTHORS tab of the profile popup: every sender identity the
+/// session observed — ✍ = its record signature was rostered
+/// (objective authorship, verified by the core); · = seen on an
+/// envelope only. Each anchor cross-referenced with the book.
+fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect) {
+    let items: Vec<ListItem> = app
+        .authors
+        .iter()
+        .map(|(a, verified)| {
+            let in_book = app.peers.iter().any(|p| &anchor_of(p) == a);
+            let mut line = vec![
+                Span::from(if *verified {
+                    " \u{270d} "
+                } else {
+                    " \u{00b7} "
+                })
+                .style(if *verified {
+                    Style::default().fg(Color::Magenta)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }),
+                Span::from(short_hex(a)).cyan(),
+                Span::from(if in_book {
+                    "  = book"
+                } else {
+                    "  not in the book"
+                })
+                .dark_gray(),
+            ];
+            if *verified && !in_book {
+                // Theoretically unreachable (verification rides a
+                // mailbox's card) — belt and braces for a drift.
+                line[2] = Span::from("  ?? verified w/o card").red();
+            }
+            ListItem::from(Line::from(line))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::bordered()
+                .title(format!(
+                    " authors ({}) — Tab flips to mailboxes ",
+                    app.authors.len()
+                ))
+                .border_style(Color::Yellow),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.authors_sel);
+}
+
 fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let staged = match &app.staged {
         Some((content, claims)) => {
@@ -622,10 +694,10 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match app.focus {
         Pane::Threads => {
-            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p peers \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Transcript => {
-            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} h left \u{00b7} p peers \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} h left \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Compose => {
             "Enter send \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc clear \u{00b7} Tab next"

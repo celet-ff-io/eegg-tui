@@ -44,6 +44,18 @@ pub enum FileBox {
     SaveTranscript,
 }
 
+/// The profile popup's two domains: the MAILBOX book (who mail is
+/// exchanged with — the manual card set) and the AUTHOR registry
+/// (which sender identities the received messages have shown —
+/// keyed by the same anchor; verified = its record signature
+/// rostered, observed = envelope only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfileTab {
+    #[default]
+    Mailbox,
+    Authors,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Threads,
@@ -99,6 +111,16 @@ pub struct App {
     /// the get answer states the FULL state, a live push carries the
     /// same shape; one wholesale replacement serves both paths.
     pub rosters: BTreeMap<Vec<u8>, Vec<Vec<u8>>>,
+    /// The AUTHOR registry: every sender identity observed this
+    /// session, whether its record signature was ever rostered
+    /// (verified — signatures never retract, the upgrade is
+    /// one-way). The authors domain of the profile popup; separate
+    /// from the mailbox book even though both index by the anchor.
+    pub authors: BTreeMap<Vec<u8>, bool>,
+    /// The profile popup's active domain.
+    pub profile_tab: ProfileTab,
+    /// The authors tab's selection.
+    pub authors_sel: ListState,
     /// This session's sent rows: (content digest, was mailed) — a
     /// commit mails only when the target set is non-empty. The ordinal
     /// in this vector = the row's chain seq within the session.
@@ -213,6 +235,9 @@ impl App {
             file_box: FileBox::None,
             save_card: None,
             rosters: BTreeMap::new(),
+            authors: BTreeMap::new(),
+            profile_tab: ProfileTab::default(),
+            authors_sel: ListState::default(),
             sent: Vec::new(),
             pending_text: None,
             ts_stamped_at: None,
@@ -317,10 +342,24 @@ impl App {
     /// the core also pushes live landings unprompted).
     fn request_signers(&mut self) {
         if let Some(t) = self.open_thread.clone() {
-            self.outbox.push(IncomingFrame {
-                method: Some(Method::MsgSignersGet(MsgSignersGet { thread: Some(t) })),
-            });
+            self.ask_signers(t);
         }
+    }
+
+    /// Ask for one thread's roster snapshot (a fresh open — the core
+    /// also pushes live landings unprompted).
+    fn ask_signers(&mut self, thread: MsgRef) {
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::MsgSignersGet(MsgSignersGet {
+                thread: Some(thread),
+            })),
+        });
+    }
+
+    /// The selected author's anchor (BTreeMap order = anchor order).
+    fn selected_author(&self) -> Option<Vec<u8>> {
+        let i = self.authors_sel.selected()?;
+        self.authors.keys().nth(i).cloned()
     }
 
     /// The path box's text with a leading `~/` expanded (the only
@@ -347,14 +386,20 @@ impl App {
         self.entries.get(i)
     }
 
-    /// The selected entry's card text in the peers popup: row 0 =
-    /// my card (verbatim from the core), the rest = the peer set,
-    /// re-encoded canonically (the card text IS the record's
-    /// canonical single-line base64).
+    /// The selected entry's card text in the profile popup, per
+    /// tab: mailboxes — row 0 = my card (verbatim from the core),
+    /// the rest = the peer set, re-encoded canonically (the card
+    /// text IS the record's canonical single-line base64); authors
+    /// — the anchor's card, only if the book holds that mailbox.
     fn selected_card(&self) -> Option<String> {
-        match self.peers_sel.selected() {
-            Some(i) if i > 0 => self.peers.get(i - 1).map(card_text),
-            _ => self.self_card.clone(),
+        match self.profile_tab {
+            ProfileTab::Authors => self
+                .selected_author()
+                .and_then(|a| self.peers.iter().find(|p| anchor_of(p) == a).map(card_text)),
+            ProfileTab::Mailbox => match self.peers_sel.selected() {
+                Some(i) if i > 0 => self.peers.get(i - 1).map(card_text),
+                _ => self.self_card.clone(),
+            },
         }
     }
 
@@ -682,13 +727,26 @@ impl App {
                 self.file_input.handle_event(&Event::Key(key));
             }
             // Listing posture.
-            (CardFlow::None, KeyCode::Char('a')) => {
+            // Adding a card is a MAILBOX-domain action.
+            (CardFlow::None, KeyCode::Char('a')) if self.profile_tab == ProfileTab::Mailbox => {
                 self.peer_input.reset();
                 self.card_flow = CardFlow::InputCard;
             }
-            // Copy the SELECTED card to the clipboard (my card or a
-            // peer's — the selection spans both; the clipboard may
-            // be unavailable — the file channel is the fallback).
+            // The profile popup's two domains flip with Tab.
+            (CardFlow::None, KeyCode::Tab) => {
+                self.profile_tab = match self.profile_tab {
+                    ProfileTab::Mailbox => ProfileTab::Authors,
+                    ProfileTab::Authors => ProfileTab::Mailbox,
+                };
+                match self.profile_tab {
+                    ProfileTab::Authors => self.authors_sel.select(Some(0)),
+                    ProfileTab::Mailbox => self.peers_sel.select(Some(0)),
+                }
+            }
+            // Copy the SELECTED card to the clipboard (a mailbox's
+            // or — on the authors tab — an author whose card the
+            // book holds; the clipboard may be unavailable — the
+            // file channel is the fallback).
             (CardFlow::None, KeyCode::Char('c')) => {
                 self.flash = Some(match self.selected_card() {
                     Some(card) => clipboard::set(&card)
@@ -707,17 +765,34 @@ impl App {
                 }
                 None => self.flash = Some("no card to save".into()),
             },
-            // The selection spans (me) + the peer set; row 0 = me
-            // always exists, even with an empty set.
-            (CardFlow::None, KeyCode::Up | KeyCode::Char('k')) => {
-                let i = self.peers_sel.selected().unwrap_or(0);
-                self.peers_sel.select(Some(i.saturating_sub(1)));
-            }
-            (CardFlow::None, KeyCode::Down | KeyCode::Char('j')) => {
-                let n = self.peers.len();
-                let i = self.peers_sel.selected().unwrap_or(0);
-                self.peers_sel.select(Some((i + 1).min(n)));
-            }
+            // The active tab's list moves; the mailbox tab's
+            // selection spans (me) + the peer set (row 0 = me
+            // always exists, even with an empty set).
+            (CardFlow::None, KeyCode::Up | KeyCode::Char('k')) => match self.profile_tab {
+                ProfileTab::Mailbox => {
+                    let i = self.peers_sel.selected().unwrap_or(0);
+                    self.peers_sel.select(Some(i.saturating_sub(1)));
+                }
+                ProfileTab::Authors => {
+                    let n = self.authors.len();
+                    let i = self.authors_sel.selected().unwrap_or(0);
+                    self.authors_sel
+                        .select((n > 0).then_some(i.saturating_sub(1)));
+                }
+            },
+            (CardFlow::None, KeyCode::Down | KeyCode::Char('j')) => match self.profile_tab {
+                ProfileTab::Mailbox => {
+                    let n = self.peers.len();
+                    let i = self.peers_sel.selected().unwrap_or(0);
+                    self.peers_sel.select(Some((i + 1).min(n)));
+                }
+                ProfileTab::Authors => {
+                    let n = self.authors.len();
+                    let i = self.authors_sel.selected().unwrap_or(0);
+                    self.authors_sel
+                        .select((n > 0).then_some((i + 1).min(n - 1)));
+                }
+            },
             (CardFlow::None, KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q')) => {
                 self.show_peers = false;
                 return false;
@@ -897,6 +972,12 @@ impl App {
                 self.peers_sel.select(Some(0));
                 self.refresh_peers();
                 self.refresh_self();
+                // The author registry spans ALL threads: one roster
+                // get per thread (bounded, day-one) — the answers
+                // feed the registry even for threads never opened.
+                for t in self.threads.clone() {
+                    self.ask_signers(t);
+                }
             }
             KeyCode::Enter if self.focus == Pane::Threads => self.open_selected_thread(),
             _ => {}
@@ -913,6 +994,14 @@ impl App {
                     // one statement; the awaiting flag tells them apart
                     // (set by the commit request; a rare arrival racing
                     // in between is misattributed — a day-one residual).
+                    // The author registry: the envelope anchor is an
+                    // OBSERVATION until the row's roster states it
+                    // (verified is a one-way upgrade).
+                    if let Some(m) = e.meta.as_ref()
+                        && !m.from.is_empty()
+                    {
+                        self.authors.entry(m.from.clone()).or_insert(false);
+                    }
                     let digest = e.meta.as_ref().map(|m| m.digest.clone());
                     if self.awaiting_commit {
                         self.awaiting_commit = false;
@@ -962,6 +1051,20 @@ impl App {
             }
             Some(Out::MsgCursorPush(p)) => self.cursor = p.refs,
             Some(Out::MsgSignersPush(p)) => {
+                // The AUTHOR registry harvests FIRST (any thread's
+                // roster proves authorship; a rostered signer is
+                // verified — signatures never retract). The open
+                // thread's snapshot is then replaced WHOLESALE: the
+                // get answer states the full state (maybe empty), a
+                // live push only fires when a roster is non-empty —
+                // the same shape both ways. Other threads'
+                // snapshots are dropped; the fresh get on open
+                // re-answers in full.
+                for r in &p.rosters {
+                    for s in &r.signers {
+                        self.authors.insert(s.clone(), true);
+                    }
+                }
                 // The open thread's roster snapshot, replaced
                 // WHOLESALE: the get answer states the full state
                 // (maybe empty), a live push only fires when a

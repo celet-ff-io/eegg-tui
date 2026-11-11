@@ -734,8 +734,8 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let inner = block.inner(area);
     block.render(area, f.buffer_mut());
     let rows = app.draft.lines().len().clamp(1, 8) as u16;
-    let [text_a, staged_a] = Layout::vertical([Constraint::Length(rows), Constraint::Min(0)])
-        .areas(inner);
+    let [text_a, staged_a] =
+        Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(inner);
     let width = text_a.width as usize;
     let lines = app.draft.lines();
     if app.focus == Pane::Compose {
@@ -744,12 +744,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         // horizontally when it runs past the width.
         let (crow, ccol) = app.draft.cursor();
         let top = crow.saturating_sub(rows as usize - 1);
-        for (i, line) in lines
-            .iter()
-            .skip(top)
-            .take(rows as usize)
-            .enumerate()
-        {
+        for (i, line) in lines.iter().skip(top).take(rows as usize).enumerate() {
             let row_no = top + i;
             let off = if row_no == crow {
                 ccol.saturating_sub(width.saturating_sub(1))
@@ -769,8 +764,8 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         }
         // The caret cell: one cell AFTER the last typed character,
         // never on it.
-        let caret_x = text_a.x
-            + (ccol.saturating_sub(ccol.saturating_sub(width.saturating_sub(1))) as u16);
+        let caret_x =
+            text_a.x + (ccol.saturating_sub(ccol.saturating_sub(width.saturating_sub(1))) as u16);
         f.set_cursor_position((caret_x, text_a.y + (crow - top) as u16));
     } else {
         for (i, line) in lines.iter().take(rows as usize).enumerate() {

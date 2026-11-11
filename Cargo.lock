@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "eegg-tui"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "arboard",
  "base64",
@@ -790,28 +790,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
 dependencies = [
  "num-traits",
-]
-
-[[package]]
-name = "fake-core"
-version = "0.1.0-alpha"
-dependencies = [
- "base64",
- "bytes",
- "clap",
- "clap-verbosity-flag",
- "crossbeam-channel",
- "env_logger",
- "jiff",
- "log",
- "pbjson-types",
- "prost",
- "prost-types",
- "protobuf-varint-deframer",
- "thiserror 2.0.21",
- "zconned-crypto",
- "zconned-material",
- "zconned-stdio-types",
 ]
 
 [[package]]

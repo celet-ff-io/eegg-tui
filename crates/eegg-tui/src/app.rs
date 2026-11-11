@@ -476,8 +476,7 @@ impl App {
                     (FileBox::LoadCompose, Some(p)) => match std::fs::read_to_string(&p) {
                         Ok(text) => {
                             self.draft.clear();
-                            self.draft
-                                .insert_str(text.trim_end_matches(['\r', '\n']));
+                            self.draft.insert_str(text.trim_end_matches(['\r', '\n']));
                             self.flash = Some("compose loaded from file".into());
                             self.file_input.reset();
                             self.file_box = FileBox::None;
@@ -980,7 +979,11 @@ impl App {
                 // encode Ctrl-Enter as Ctrl-J — accepted as a third
                 // spelling of the same intent. Plain Enter is a
                 // newline (the draft is multi-line first-class).
-                KeyCode::Enter if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                KeyCode::Enter
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
                     self.compose_send();
                 }
                 KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
@@ -1005,8 +1008,7 @@ impl App {
                 KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match clipboard::get() {
                         Ok(text) => {
-                            self.draft
-                                .insert_str(text.trim_end_matches(['\r', '\n']));
+                            self.draft.insert_str(text.trim_end_matches(['\r', '\n']));
                             self.flash = Some("pasted from clipboard".into());
                         }
                         Err(reason) => self.flash = Some(reason),

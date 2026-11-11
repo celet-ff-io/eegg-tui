@@ -117,7 +117,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 38] = [
+    let rows: [(bool, &str, &str); 39] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -144,6 +144,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "Esc", "clear the compose text"),
         (false, "peers", ""),
         (true, "p", "open the peers popup"),
+        (
+            true,
+            "+ record",
+            "the card's third key (record signing); · no record key = a legacy card — re-exchange it",
+        ),
         (true, "c", "copy the selected card (me or a peer)"),
         (true, "s", "save the selected card to a file"),
         (true, "a", "add the counterpart's card"),
@@ -245,14 +250,22 @@ fn render_log_popup(app: &App, f: &mut Frame) {
 /// The peers popup: the core's own card on top (copy source), the
 /// send-target set in the middle, the card/file box at the bottom.
 /// One peers-list row: the addressing anchor (the signing key's
-/// fingerprint — the same form row authors are shown by), the
-/// algorithm pair, the endpoints; `tag` marks the self row.
+/// fingerprint — the same form row authors are shown by), the key
+/// set (sign + DH + record — a LEGACY card lacks the third key,
+/// its record signatures cannot verify until re-exchanged), the
+/// endpoints; `tag` marks the self row.
 fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
     let mut line = vec![
         Span::from(tag.to_owned()).yellow(),
         Span::from(short_hex(&anchor_of(p))).cyan(),
         Span::from(format!(" {} + {}", p.sign_algo, p.dh_algo)).dark_gray(),
     ];
+    match &p.record_sign_pub {
+        Some(k) if !k.is_empty() => {
+            line.push(Span::from(" + record").dark_gray());
+        }
+        _ => line.push(Span::from("  · no record key").red()),
+    }
     if !p.endpoints.is_empty() {
         line.push(Span::from(format!("  {}", p.endpoints.join(" "))));
     }

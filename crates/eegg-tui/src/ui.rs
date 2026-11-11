@@ -187,7 +187,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (false, "global", ""),
         (
             true,
-            "<ctrl+hjkl>",
+            "<Ctrl+hjkl>",
             "navigate from anywhere: h = region 1 · l = region 2 · j = next · k = previous",
         ),
         (
@@ -217,7 +217,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (
             true,
             "from <anchor>",
-            "the row's author; \u{270d} = roster-confirmed",
+            "the row's author; * = roster-confirmed",
         ),
         (true, "j / k \u{2191}\u{2193}", "scroll"),
         (true, "PgUp/PgDn", "page by a screen"),
@@ -231,19 +231,19 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "i",
             "summon the composer (transcript only; typing mode)",
         ),
-        (true, "<ctrl+enter>", "send the compose text"),
-        (true, "<alt+enter>", "send the compose text (either works)"),
-        (true, "<ctrl+w>", "drop the word before the caret"),
+        (true, "<Ctrl+Enter>", "send the compose text"),
+        (true, "<Alt+Enter>", "send the compose text (either works)"),
+        (true, "<Ctrl+W>", "drop the word before the caret"),
         (
             true,
             "Home / End",
-            "line start / end (<ctrl+home>/<ctrl+end> = the whole draft)",
+            "line start / end (<Ctrl+Home>/<Ctrl+End> = the whole draft)",
         ),
-        (true, "<ctrl+u>", "clear the compose text"),
-        (true, "<ctrl+c>", "copy the compose text to the clipboard"),
-        (true, "<ctrl+v>", "paste the clipboard at the caret"),
-        (true, "<ctrl+r>", "load the compose text from a file"),
-        (true, "<ctrl+s>", "save the compose text to a file"),
+        (true, "<Ctrl+U>", "clear the compose text"),
+        (true, "<Ctrl+C>", "copy the compose text to the clipboard"),
+        (true, "<Ctrl+V>", "paste the clipboard at the caret"),
+        (true, "<Ctrl+R>", "load the compose text from a file"),
+        (true, "<Ctrl+S>", "save the compose text to a file"),
         (
             true,
             "Esc",
@@ -253,7 +253,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (
             true,
             "+ record",
-            "the card's third key (record signing); \u{00b7} no record key = a legacy card — re-exchange it",
+            "the card's third key (missing = a legacy card)",
         ),
         (
             true,
@@ -262,14 +262,14 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         ),
         (true, "s", "save the selected card to a file"),
         (true, "a", "add the counterpart's card"),
-        (true, "<ctrl+v>", "paste the card from the clipboard"),
-        (true, "<ctrl+r>", "load the card from a file"),
+        (true, "<Ctrl+V>", "paste the card from the clipboard"),
+        (true, "<Ctrl+R>", "load the card from a file"),
         (true, "j / k \u{2191}\u{2193}", "move the selection"),
         (true, "Esc", "back a level / cancel the flow"),
         (false, "authors", ""),
         (
             true,
-            "\u{270d}",
+            "*",
             "verified authorship (the record signature rostered)",
         ),
         (
@@ -299,7 +299,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
                 // description tight against it.
                 Line::from(vec![
                     Span::from(" "),
-                    Span::from(format!("{key:>12} ")).yellow(),
+                    Span::styled(format!("{key:>12} "), key_style(key)),
                     Span::from(desc.to_owned()),
                 ])
             } else {
@@ -552,16 +552,13 @@ fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
                 .filter(|r| !r.is_empty())
                 .unwrap_or(fallback.as_str());
             let mut line = vec![
-                Span::from(if entry.verified {
-                    " \u{270d} "
-                } else {
-                    " \u{00b7} "
-                })
-                .style(if entry.verified {
-                    Style::default().fg(Color::Magenta)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                }),
+                Span::from(if entry.verified { " * " } else { " \u{00b7} " }).style(
+                    if entry.verified {
+                        Style::default().fg(Color::Magenta)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
                 Span::from(shown.to_owned()).cyan(),
                 Span::from(if in_book {
                     "  = book"
@@ -807,7 +804,7 @@ fn entry_item(
     if let Some(a) = author {
         line.push(Span::from(format!(" from {a}")).dark_gray());
         if confirmed {
-            line.push(Span::from(" \u{270d}").magenta());
+            line.push(Span::from(" *").magenta());
         }
     }
     line.push(Span::from("  "));
@@ -901,14 +898,14 @@ fn keybar_hints(app: &App) -> &'static str {
     // Typing: the editor face. (Standby shows the focused content's
     // face below — standby IS the default state.)
     if app.focus == Focus::Compose {
-        return "<ctrl+enter>/<alt+enter> send · <ctrl+w> drop word · <ctrl+u> clear · <ctrl+v> paste · <ctrl+c> copy · <ctrl+r>/<ctrl+s> file · Esc standby";
+        return "<Ctrl+Enter>/<Alt+Enter> send · <Ctrl+W> drop word · <Ctrl+U> clear · <Ctrl+V> paste · <Ctrl+C> copy · <Ctrl+R>/<Ctrl+S> file · Esc standby";
     }
     match app.regions[app.focus_region()].content {
         ContentKind::Threads => {
-            "<ctrl+hjkl> navigate · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
+            "<Ctrl+hjkl> navigate · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
-            "<ctrl+hjkl> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
+            "<Ctrl+hjkl> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
         }
         ContentKind::Authors => {
             "r remark · R clear remark · c copy card · s save card · j/k move · m wheel · L log · ? help · q quit"
@@ -922,14 +919,27 @@ fn keybar_hints(app: &App) -> &'static str {
 /// One hint segment as styled spans: the KEY stands out (orange,
 /// bold — a distinct hue from the borders' yellow), the description
 /// reads at the plain dark gray.
+/// The key-column style: single keys stand orange+bold; NAMED
+/// multi-key tokens (Esc, Enter, the Ctrl/Alt combos...) add ITALIC
+/// — they are never a single key, and the '+' inside a combo is
+/// italic with the token, never a literal '+' key.
+fn key_style(key: &str) -> Style {
+    const SINGLE: Style = Style::new().fg(Color::Indexed(208)).bold();
+    const NAMED: Style = Style::new().fg(Color::Indexed(208)).bold().italic();
+    let named = key.contains('<')
+        || ["Esc", "Enter", "Home", "End", "Tab", "Pg", "Ctrl", "Alt"]
+            .iter()
+            .any(|w| key.contains(w));
+    if named { NAMED } else { SINGLE }
+}
+
 fn hint_spans(seg: &str) -> Vec<Span<'static>> {
-    const KEY: Style = Style::new().fg(Color::Indexed(208)).bold();
     match seg.split_once(' ') {
         Some((k, d)) => vec![
-            Span::styled(k.to_owned(), KEY),
+            Span::styled(k.to_owned(), key_style(k)),
             Span::styled(format!(" {d}"), Style::new().dark_gray()),
         ],
-        None => vec![Span::styled(seg.to_owned(), KEY)],
+        None => vec![Span::styled(seg.to_owned(), key_style(seg))],
     }
 }
 

@@ -1087,7 +1087,7 @@ impl App {
                     self.wheel = false;
                     self.set_region_content(self.focus_region(), ContentKind::nth(n));
                 }
-                KeyCode::Esc | KeyCode::Char('o') => self.wheel = false,
+                KeyCode::Esc | KeyCode::Char('m') => self.wheel = false,
                 _ => {}
             }
             return;
@@ -1148,8 +1148,10 @@ impl App {
             // The numbered regions: the direct jump (no cycling).
             KeyCode::Char('1') => self.nav_to_region(0),
             KeyCode::Char('2') => self.nav_to_region(1),
-            // The wheel: the in-place content menu over this region.
-            KeyCode::Char('o') => self.wheel = true,
+            // The wheel: the in-place content menu over this
+            // region. `o` stays free for the transcript's future
+            // open-file key (the multimedia era).
+            KeyCode::Char('m') => self.wheel = true,
             // The mailboxes, right here: focus stays, the content
             // swaps.
             KeyCode::Char('p') => {

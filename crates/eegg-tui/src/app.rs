@@ -127,16 +127,6 @@ pub enum Focus {
     Compose,
 }
 
-/// The composer's two modes: typing (the editor face) and moving
-/// (the structural face — Esc steps out of typing into it, where
-/// plain hjkl navigates; any navigation back in returns to typing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ComposeMode {
-    #[default]
-    Input,
-    Nav,
-}
-
 #[derive(Debug)]
 pub struct App {
     pub focus: Focus,
@@ -157,12 +147,10 @@ pub struct App {
     /// The multi-line compose draft (the local editor state; the
     /// single-line boxes below keep tui-input).
     pub draft: Draft,
-    /// The compose surface is summoned/collapsed (the composer is
-    /// hard to leave — leaving and re-summoning are explicit keys).
+    /// The compose surface is summoned/collapsed. When visible but
+    /// unfocused it is STANDBY: the whole UI behaves exactly like
+    /// the default state, plus one Esc function (Esc hides it).
     pub show_compose: bool,
-    /// The composer's mode: typing vs the structural face (Esc
-    /// steps between them; navigation back in returns to typing).
-    pub compose_mode: ComposeMode,
     /// The staged commit base (from msg_cursor_push; empty = not set).
     pub cursor: Vec<MsgRef>,
     /// Set by the new-thread key: the next send starts a FRESH chain
@@ -331,7 +319,6 @@ impl App {
             open_thread: None,
             draft: Draft::new(),
             show_compose: false,
-            compose_mode: ComposeMode::Input,
             cursor: Vec::new(),
             new_thread_intent: false,
             staged: None,
@@ -410,46 +397,22 @@ impl App {
         });
     }
 
-    /// The forward focus cycle: region 1 → region 2 → the composer
-    /// (only when summoned) → region 1.
+    /// The forward focus cycle: region 1 → region 2 → region 1.
+    /// The composer is NOT in the cycle — `i`/`n` are its only
+    /// entries (its standby face is the default state).
     fn cycle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Region(0) => Focus::Region(1),
-            Focus::Region(_) => {
-                if self.show_compose {
-                    Focus::Compose
-                } else {
-                    Focus::Region(0)
-                }
-            }
-            Focus::Compose => Focus::Region(0),
+            _ => Focus::Region(0),
         };
-        self.entered_compose();
     }
 
-    /// The reverse cycle (Ctrl+k / plain k in the composer's moving
-    /// mode): compose → region 2 → region 1 → compose.
+    /// The reverse cycle (Ctrl+k): region 2 → region 1 → region 2.
     fn cycle_focus_back(&mut self) {
         self.focus = match self.focus {
-            Focus::Compose => Focus::Region(self.compose_host.min(1)),
-            Focus::Region(0) => {
-                if self.show_compose {
-                    Focus::Compose
-                } else {
-                    Focus::Region(1)
-                }
-            }
-            Focus::Region(_) => Focus::Region(0),
+            Focus::Region(0) => Focus::Region(1),
+            _ => Focus::Region(0),
         };
-        self.entered_compose();
-    }
-
-    /// Landing on the composer through NAVIGATION returns it to the
-    /// typing mode (the draft is untouched — only the face swaps).
-    fn entered_compose(&mut self) {
-        if self.focus == Focus::Compose {
-            self.compose_mode = ComposeMode::Input;
-        }
     }
 
     /// Direct structural jumps: to a numbered region (Ctrl+h/l, the
@@ -533,7 +496,6 @@ impl App {
         }
         if self.show_compose && self.compose_host == region {
             self.show_compose = false;
-            self.compose_mode = ComposeMode::Input;
             if self.focus == Focus::Compose {
                 self.focus = Focus::Region(region);
             }
@@ -728,11 +690,23 @@ impl App {
     /// tip); with no open thread (or a new-thread intent) it starts a
     /// fresh chain. Sending collapses the composer — the text is on
     /// its way, the pane goes back to the reading surface.
-    /// The composer's key face: the structural layer first (Ctrl+hjkl
-    /// works in BOTH modes), then the mode's own face — typing runs
-    /// the editor, moving hands plain hjkl to the structure.
+    /// The composer's key face: the SEND keys first (Ctrl/Alt-Enter
+    /// must not be eaten by the structural branch), then the
+    /// structural layer (Ctrl+hjkl works from the caret too), then
+    /// the editor. Esc steps down to STANDBY: the focus returns to
+    /// the transcript region and the whole UI behaves like the
+    /// default state — only Esc now also hides the composer.
     fn on_key_compose(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        // Send: either spelling (terminal support varies).
+        if key.code == KeyCode::Enter
+            && key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.compose_send();
+            return;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
@@ -741,48 +715,22 @@ impl App {
                 KeyCode::Char('l') | KeyCode::Right => self.nav_to_region(1),
                 KeyCode::Char('j') | KeyCode::Down => self.cycle_focus(),
                 KeyCode::Char('k') | KeyCode::Up => self.cycle_focus_back(),
+                KeyCode::Tab => self.cycle_focus(),
                 _ => return,
             }
             return;
         }
-        match (self.compose_mode, key.code) {
-            // The moving mode: the content layer is FREE here, so
-            // plain hjkl navigates too; Esc hides; i returns to
-            // typing.
-            (ComposeMode::Nav, KeyCode::Esc) => {
-                self.show_compose = false;
-                self.focus = Focus::Region(self.compose_host);
-                self.compose_mode = ComposeMode::Input;
-            }
-            (ComposeMode::Nav, KeyCode::Char('h') | KeyCode::Left) => self.nav_to_region(0),
-            (ComposeMode::Nav, KeyCode::Char('l') | KeyCode::Right) => self.nav_to_region(1),
-            (ComposeMode::Nav, KeyCode::Char('j') | KeyCode::Down) => self.cycle_focus(),
-            (ComposeMode::Nav, KeyCode::Char('k') | KeyCode::Up) => self.cycle_focus_back(),
-            (ComposeMode::Nav, KeyCode::Char('i')) => self.compose_mode = ComposeMode::Input,
-            (ComposeMode::Nav, _) => {}
-            // The typing mode: the editor face. Enter is a newline;
-            // Ctrl-Enter / Alt-Enter send (the legacy Ctrl-J spelling
-            // is retired — Ctrl+J navigates).
-            (ComposeMode::Input, KeyCode::Tab) => self.cycle_focus(),
-            (ComposeMode::Input, KeyCode::Esc) => self.compose_mode = ComposeMode::Nav,
-            (ComposeMode::Input, KeyCode::Enter)
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.compose_send();
-            }
-            (ComposeMode::Input, KeyCode::Char('u'))
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+        match key.code {
+            // Leave typing: standby (visible, unfocused, the normal
+            // UI everywhere; Esc again hides the composer).
+            KeyCode::Esc => self.focus = Focus::Region(self.compose_host),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.draft.clear();
             }
             // The compose channels: copy/paste through the clipboard
             // (may be unavailable), read/write through a file (always
             // available).
-            (ComposeMode::Input, KeyCode::Char('c'))
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let text = self.draft.text().trim().to_owned();
                 self.flash = Some(if text.is_empty() {
                     "nothing to copy".into()
@@ -792,9 +740,7 @@ impl App {
                         .unwrap_or_else(|reason| format!("{reason} — use Ctrl-S to save a file"))
                 });
             }
-            (ComposeMode::Input, KeyCode::Char('v'))
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match clipboard::get() {
                     Ok(text) => {
                         self.draft.insert_str(text.trim_end_matches(['\r', '\n']));
@@ -803,19 +749,15 @@ impl App {
                     Err(reason) => self.flash = Some(reason),
                 }
             }
-            (ComposeMode::Input, KeyCode::Char('r'))
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.file_input.reset();
                 self.file_box = FileBox::LoadCompose;
             }
-            (ComposeMode::Input, KeyCode::Char('s'))
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.file_input.reset();
                 self.file_box = FileBox::SaveCompose;
             }
-            (ComposeMode::Input, _) => {
+            _ => {
                 self.draft.handle_key(key);
             }
         }
@@ -829,7 +771,6 @@ impl App {
         self.draft.clear();
         self.show_compose = false;
         self.focus = Focus::Region(self.compose_host);
-        self.compose_mode = ComposeMode::Input;
         // The timestamp discipline: the interface keeps the
         // "stamped" state (a stamp within the last window). When the
         // state is down, a stamp MESSAGE commits first and the text
@@ -1223,6 +1164,11 @@ impl App {
                 self.show_log = !self.show_log;
                 self.log_scroll = 0;
             }
+            // Standby composer: Esc hides it (its one extra
+            // function over the default state).
+            KeyCode::Esc if self.show_compose => {
+                self.show_compose = false;
+            }
             // Generic list motion over the focused region's active
             // content.
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
@@ -1329,7 +1275,6 @@ impl App {
         self.show_compose = true;
         self.compose_host = fi;
         self.focus = Focus::Compose;
-        self.compose_mode = ComposeMode::Input;
     }
 
     /// Copy the SELECTED card to the clipboard (a mailbox's or — in

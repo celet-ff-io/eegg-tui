@@ -17,9 +17,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use crate::app::{
-    App, CardFlow, ComposeMode, ContentKind, Focus, anchor_of, preview_bytes, short_hex,
-};
+use crate::app::{App, CardFlow, ContentKind, Focus, anchor_of, preview_bytes, short_hex};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -80,21 +78,10 @@ pub fn render(app: &mut App, f: &mut Frame) {
     }
 }
 
-/// One region: its content, or the composer's 日 split when THIS
-/// region hosts an open composer (the composer is the transcript's
-/// sub-window — the log above, the compose below).
+/// One region: its content, ONE frame. The composer (when this
+/// region hosts an open one) renders INSIDE the transcript frame —
+/// a rule, the draft rows, the staged line; no second frame.
 fn render_region(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
-    if app.show_compose
-        && app.compose_host == i
-        && app.regions[i].content == ContentKind::Transcript
-    {
-        let rows = app.draft.lines().len().clamp(1, 8) as u16;
-        let [t_area, c_area] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(rows + 3)]).areas(area);
-        render_transcript(app, f, i, t_area);
-        render_compose(app, f, c_area);
-        return;
-    }
     match app.regions[i].content {
         ContentKind::Threads => render_threads(app, f, i, area),
         ContentKind::Transcript => render_transcript(app, f, i, area),
@@ -103,14 +90,22 @@ fn render_region(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude:
     }
 }
 
-/// A region border's color: yellow when the focus is here, dark
-/// gray otherwise.
+/// A region border's color: yellow when the region focus is here;
+/// GREEN when the composer inside it holds the focus (typing — the
+/// frame encloses the focused compose, and green says so without
+/// stealing yellow's region-focus meaning); dark gray otherwise.
 fn region_border(app: &App, i: usize) -> Color {
-    if app.focus == Focus::Region(i) {
-        Color::Yellow
-    } else {
-        Color::DarkGray
+    match app.focus {
+        Focus::Region(f) if f == i => Color::Yellow,
+        Focus::Compose if app.compose_host == i => Color::Green,
+        _ => Color::DarkGray,
     }
+}
+
+/// A section rule inside a frame: NEVER yellow (yellow means the
+/// region focus; a colored rule would read as a second frame).
+fn rule(width: usize, label: &str) -> Span<'static> {
+    Span::from(format!("{:-^width$}", label)).dark_gray()
 }
 
 /// The wheel: the in-place content menu, drawn over the focused
@@ -188,7 +183,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 57] = [
+    let rows: [(bool, &str, &str); 54] = [
         (false, "global", ""),
         (
             true,
@@ -200,8 +195,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "h / l",
             "the same left/right moves (plain keys — the lists and the composer keep what they use)",
         ),
-        (true, "Tab", "cycle focus (regions, then the composer)"),
-        (true, "1 / 2", "jump straight to region 1 / 2"),
+        (true, "Tab", "cycle focus between the regions"),
         (true, "m", "the wheel: switch this region's content"),
         (true, "p", "show the mailboxes here"),
         (true, "L", "core log popup (the core's stderr ring)"),
@@ -253,14 +247,8 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (
             true,
             "Esc",
-            "typing \u{2192} moving; again = hide the composer",
+            "typing \u{2192} standby (the normal UI; Esc again = hide the composer)",
         ),
-        (
-            true,
-            "hjkl (moving)",
-            "navigate while the composer is in the moving mode",
-        ),
-        (true, "i (moving)", "back to typing"),
         (false, "mailboxes", ""),
         (
             true,
@@ -403,39 +391,44 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
         app.card_flow,
         CardFlow::InputCard | CardFlow::ReadCard | CardFlow::SaveCard
     );
-    let [card, list, input] = Layout::vertical([
-        Constraint::Length(3),
+    let block = Block::bordered()
+        .title(format!(" {} mailboxes ", i + 1))
+        .border_style(region_border(app, i));
+    let inner = block.inner(area);
+    block.render(area, f.buffer_mut());
+    let fl = if flow { 1 } else { 0 };
+    let [card_a, rule_a, list_a, frule_a, input_a, help_a] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(if flow { 3 } else { 0 }),
+        Constraint::Length(fl),
+        Constraint::Length(fl),
+        Constraint::Length(fl),
     ])
-    .areas(area);
+    .areas(inner);
 
-    // The card box shows TWO text lines: a longer card is clipped
-    // with an explicit ellipsis — the full text travels through c
-    // (clipboard) / s (file) on the SELECTED row, never through the
-    // screen.
+    // The card text: TWO rows; a longer card is clipped with an
+    // explicit ellipsis — the full text travels through c (clipboard)
+    // / s (file) on the SELECTED row, never through the screen.
     let card_text = app.self_card.clone().unwrap_or_else(|| "(no card)".into());
-    let capacity = card.width.saturating_sub(2) as usize * 2;
+    let capacity = card_a.width as usize * 2;
     let shown = if card_text.chars().count() > capacity {
         let kept: String = card_text.chars().take(capacity.saturating_sub(1)).collect();
         format!("{kept}\u{2026}")
     } else {
         card_text
     };
-    Paragraph::new(Line::from(Span::from(shown).cyan()))
+    Paragraph::new(Span::from(shown).cyan())
         .wrap(ratatui::widgets::Wrap { trim: false })
-        .block(
-            Block::bordered()
-                .title(format!(
-                    " {} my card — j/k selects (me) or a peer \u{00b7} c copy \u{00b7} s save ",
-                    i + 1
-                ))
-                .border_style(region_border(app, i)),
-        )
-        .render(card, f.buffer_mut());
+        .render(card_a, f.buffer_mut());
 
-    // The selection spans me + the peer set: row 0 = me (decoded
-    // from my card text for the same record display).
+    // The rule names the section below it (the selection spans me +
+    // the peer set: row 0 = me).
+    Paragraph::new(rule(
+        inner.width as usize,
+        &format!(" peers ({}) ", app.peers.len()),
+    ))
+    .render(rule_a, f.buffer_mut());
     let mut items: Vec<ListItem> = Vec::with_capacity(app.peers.len() + 1);
     items.push(
         match app
@@ -448,28 +441,23 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
         },
     );
     items.extend(app.peers.iter().map(|p| peer_item(p, "    ")));
-    let list_w = List::new(items)
-        .block(
-            Block::bordered()
-                .title(format!(" peers ({}) ", app.peers.len()))
-                .border_style(region_border(app, i)),
-        )
-        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let list_w =
+        List::new(items).highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     ratatui::widgets::StatefulWidget::render(
         &list_w,
-        list,
+        list_a,
         f.buffer_mut(),
         &mut app.regions[i].mailboxes_sel,
     );
 
     if flow {
-        let (title, prefix, value, caret_col) = match app.card_flow {
+        let (prefix, value, caret_col, help): (_, String, u16, &str) = match app.card_flow {
             // A card is one long base64 line: the visible window
             // follows the caret (horizontal scroll), otherwise the
             // tail is unseeable.
             CardFlow::InputCard => {
                 let prefix = "paste card> ";
-                let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+                let text_width = input_a.width.saturating_sub(prefix.len() as u16) as usize;
                 let scroll = app.peer_input.visual_scroll(text_width);
                 let visible: String = app
                     .peer_input
@@ -480,15 +468,15 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
                     .collect();
                 let caret = app.peer_input.visual_cursor() - scroll;
                 (
-                    " add peer: Enter submit \u{00b7} Ctrl-V clipboard \u{00b7} Ctrl-R file \u{00b7} Esc cancel ",
                     prefix,
                     visible,
                     caret as u16,
+                    "Enter submit · Ctrl-V paste · Ctrl-R load file · Esc cancel",
                 )
             }
             CardFlow::ReadCard => {
                 let prefix = "card file> ";
-                let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+                let text_width = input_a.width.saturating_sub(prefix.len() as u16) as usize;
                 let scroll = app.file_input.visual_scroll(text_width);
                 let visible: String = app
                     .file_input
@@ -498,16 +486,11 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
                     .take(text_width)
                     .collect();
                 let caret = app.file_input.visual_cursor() - scroll;
-                (
-                    " read card from file: Enter load \u{00b7} Esc back ",
-                    prefix,
-                    visible,
-                    caret as u16,
-                )
+                (prefix, visible, caret as u16, "Enter load · Esc back")
             }
             CardFlow::SaveCard => {
                 let prefix = "save to> ";
-                let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+                let text_width = input_a.width.saturating_sub(prefix.len() as u16) as usize;
                 let scroll = app.file_input.visual_scroll(text_width);
                 let visible: String = app
                     .file_input
@@ -518,21 +501,22 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
                     .collect();
                 let caret = app.file_input.visual_cursor() - scroll;
                 (
-                    " save the selected card to file (~/ expands): Enter save \u{00b7} Esc back ",
                     prefix,
                     visible,
                     caret as u16,
+                    "Enter save (~/ expands) · Esc back",
                 )
             }
             CardFlow::None | CardFlow::InputRemark => unreachable!("checked above"),
         };
+        Paragraph::new(rule(inner.width as usize, "")).render(frule_a, f.buffer_mut());
         Paragraph::new(Line::from(vec![
             Span::from(prefix).yellow(),
             Span::from(value),
         ]))
-        .block(Block::bordered().title(title))
-        .render(input, f.buffer_mut());
-        f.set_cursor_position((input.x + 1 + prefix.len() as u16 + caret_col, input.y + 1));
+        .render(input_a, f.buffer_mut());
+        f.set_cursor_position((input_a.x + prefix.len() as u16 + caret_col, input_a.y));
+        Paragraph::new(Span::from(help).dark_gray()).render(help_a, f.buffer_mut());
     }
 }
 
@@ -542,16 +526,20 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
 /// Each row shows the identity's local remark (the key fingerprint
 /// only as the fallback), cross-referenced with the book.
 fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
-    // The remark input box sits at the region's bottom edge.
-    let [list, input] = Layout::vertical([
+    let block = Block::bordered()
+        .title(format!(" {} authors ", i + 1))
+        .border_style(region_border(app, i));
+    let inner = block.inner(area);
+    block.render(area, f.buffer_mut());
+    let flow = app.card_flow == CardFlow::InputRemark;
+    let fl = if flow { 1 } else { 0 };
+    let [list_a, frule_a, input_a, help_a] = Layout::vertical([
         Constraint::Min(0),
-        Constraint::Length(if app.card_flow == CardFlow::InputRemark {
-            3
-        } else {
-            0
-        }),
+        Constraint::Length(fl),
+        Constraint::Length(fl),
+        Constraint::Length(fl),
     ])
-    .areas(area);
+    .areas(inner);
     let items: Vec<ListItem> = app
         .authors
         .iter()
@@ -590,22 +578,17 @@ fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
             ListItem::from(Line::from(line))
         })
         .collect();
-    let list_w = List::new(items)
-        .block(
-            Block::bordered()
-                .title(format!(" {} authors ({}) ", i + 1, app.authors.len()))
-                .border_style(region_border(app, i)),
-        )
-        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let list_w =
+        List::new(items).highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     ratatui::widgets::StatefulWidget::render(
         &list_w,
-        list,
+        list_a,
         f.buffer_mut(),
         &mut app.regions[i].authors_sel,
     );
-    if app.card_flow == CardFlow::InputRemark {
+    if flow {
         let prefix = "remark> ";
-        let text_width = input.width.saturating_sub(2 + prefix.len() as u16) as usize;
+        let text_width = input_a.width.saturating_sub(prefix.len() as u16) as usize;
         let scroll = app.remark_input.visual_scroll(text_width);
         let visible: String = app
             .remark_input
@@ -615,20 +598,15 @@ fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
             .take(text_width)
             .collect();
         let caret = app.remark_input.visual_cursor() - scroll;
+        Paragraph::new(rule(inner.width as usize, "")).render(frule_a, f.buffer_mut());
         Paragraph::new(Line::from(vec![
             Span::from(prefix).yellow(),
             Span::from(visible),
         ]))
-        .block(
-            Block::bordered().title(
-                " set the selected identity's remark: Enter set \u{00b7} Ctrl-V paste \u{00b7} Esc cancel ",
-            ),
-        )
-        .render(input, f.buffer_mut());
-        f.set_cursor_position((
-            input.x + 1 + prefix.len() as u16 + caret as u16,
-            input.y + 1,
-        ));
+        .render(input_a, f.buffer_mut());
+        f.set_cursor_position((input_a.x + prefix.len() as u16 + caret as u16, input_a.y));
+        Paragraph::new(Span::from("Enter set · Ctrl-V paste · Esc cancel").dark_gray())
+            .render(help_a, f.buffer_mut());
     }
 }
 
@@ -710,6 +688,27 @@ fn render_threads(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
 }
 
 fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
+    let compose_here = app.show_compose && app.compose_host == i;
+    let draft_rows = if compose_here {
+        app.draft.lines().len().clamp(1, 8) as u16
+    } else {
+        0
+    };
+    let block = Block::bordered()
+        .title(format!(" {} {} ", i + 1, ContentKind::Transcript.title()))
+        .border_style(region_border(app, i));
+    let inner = block.inner(area);
+    block.render(area, f.buffer_mut());
+    let [log_a, rule_a, draft_a, staged_a] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(if compose_here { 1 } else { 0 }),
+        Constraint::Length(draft_rows),
+        Constraint::Length(if compose_here { 1 } else { 0 }),
+    ])
+    .areas(inner);
+    if compose_here {
+        Paragraph::new(rule(inner.width as usize, " compose ")).render(rule_a, f.buffer_mut());
+    }
     let items: Vec<ListItem> = app
         .entries
         .iter()
@@ -739,22 +738,21 @@ fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prel
             entry_item(e, app.row_received(&digest), author.as_deref(), confirmed)
         })
         .collect();
-    let list = List::new(items)
-        .block(
-            Block::bordered()
-                .title(format!(" {} {} ", i + 1, ContentKind::Transcript.title()))
-                .border_style(region_border(app, i)),
-        )
-        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let list =
+        List::new(items).highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     // The viewport height feeds the PgUp/PgDn page (the page is what
-    // the terminal actually showed at the last paint) — per region.
-    app.regions[i].page_rows = area.height.saturating_sub(2);
+    // the terminal actually showed at the last paint) — per region,
+    // the LOG rows only (the compose section is not paged).
+    app.regions[i].page_rows = log_a.height;
     ratatui::widgets::StatefulWidget::render(
         &list,
-        area,
+        log_a,
         f.buffer_mut(),
         &mut app.regions[i].transcript_sel,
     );
+    if compose_here {
+        render_compose_body(app, f, draft_a, staged_a);
+    }
 }
 
 fn entry_item(
@@ -825,41 +823,32 @@ fn entry_item(
     ListItem::from(Line::from(line))
 }
 
-fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
-    if area.height == 0 {
-        return;
-    }
+/// The composer's body INSIDE its transcript's frame: the draft
+/// rows (the caret when typing; dimmed on standby) + the staged
+/// line. The section rule is drawn by the transcript renderer.
+fn render_compose_body(
+    app: &App,
+    f: &mut Frame,
+    draft_a: ratatui::prelude::Rect,
+    staged_a: ratatui::prelude::Rect,
+) {
     let staged = match &app.staged {
         Some((content, claims)) => {
             let c = content
                 .as_ref()
                 .map(|v| format!("{} \u{2014} {}", v.kind, preview_bytes(&v.data)))
                 .unwrap_or_else(|| "(empty)".into());
-            format!("staged: {c} \u{00b7} {} claim(s)", claims.len())
+            format!("staged: {c} · {} claim(s)", claims.len())
         }
         None => "staged: (nothing)".into(),
     };
-    // The moving mode is visibly distinct: a cyan border + the ·nav·
-    // title, so the double-Esc (leave → hide) is never a surprise.
-    let (title, border) = if app.compose_mode == ComposeMode::Nav {
-        (" compose ·nav· ", Color::Cyan)
-    } else if app.focus == Focus::Compose {
-        (" compose ", Color::Yellow)
-    } else {
-        (" compose ", Color::DarkGray)
-    };
-    let block = Block::bordered().title(title).border_style(border);
-    let inner = block.inner(area);
-    block.render(area, f.buffer_mut());
     let rows = app.draft.lines().len().clamp(1, 8) as u16;
-    let [text_a, staged_a] =
-        Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(inner);
-    let width = text_a.width as usize;
+    let width = draft_a.width as usize;
     let lines = app.draft.lines();
-    if app.focus == Focus::Compose && app.compose_mode == ComposeMode::Input {
-        // The caret rides a following viewport: vertical scroll keeps
-        // the caret's row on screen; the caret's row also scrolls
-        // horizontally when it runs past the width.
+    if app.focus == Focus::Compose {
+        // Typing: the caret rides a following viewport — vertical
+        // scroll keeps the caret's row on screen; the caret's row
+        // also scrolls horizontally when it runs past the width.
         let (crow, ccol) = app.draft.cursor();
         let top = crow.saturating_sub(rows as usize - 1);
         for (i, line) in lines.iter().skip(top).take(rows as usize).enumerate() {
@@ -872,9 +861,9 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
             let visible: String = line.chars().skip(off).take(width).collect();
             Line::from(Span::from(visible)).render(
                 ratatui::prelude::Rect {
-                    x: text_a.x,
-                    y: text_a.y + i as u16,
-                    width: text_a.width,
+                    x: draft_a.x,
+                    y: draft_a.y + i as u16,
+                    width: draft_a.width,
                     height: 1,
                 },
                 f.buffer_mut(),
@@ -883,26 +872,18 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         // The caret cell: one cell AFTER the last typed character,
         // never on it.
         let caret_x =
-            text_a.x + (ccol.saturating_sub(ccol.saturating_sub(width.saturating_sub(1))) as u16);
-        f.set_cursor_position((caret_x, text_a.y + (crow - top) as u16));
+            draft_a.x + (ccol.saturating_sub(ccol.saturating_sub(width.saturating_sub(1))) as u16);
+        f.set_cursor_position((caret_x, draft_a.y + (crow - top) as u16));
     } else {
-        // Unfocused = dimmed; focused-but-moving = normal color (the
-        // face swap is already visible on the border/title). The
-        // window still follows the caret row when focused.
-        let dim = app.focus != Focus::Compose;
-        let top = if dim {
-            0
-        } else {
-            app.draft.cursor().0.saturating_sub(rows as usize - 1)
-        };
-        for (i, line) in lines.iter().skip(top).take(rows as usize).enumerate() {
+        // Standby: dimmed, and the window follows nothing (the top
+        // of the draft shows).
+        for (i, line) in lines.iter().take(rows as usize).enumerate() {
             let visible: String = line.chars().take(width).collect();
-            let span = Span::from(visible);
-            Line::from(if dim { span.dark_gray() } else { span }).render(
+            Line::from(Span::from(visible).dark_gray()).render(
                 ratatui::prelude::Rect {
-                    x: text_a.x,
-                    y: text_a.y + i as u16,
-                    width: text_a.width,
+                    x: draft_a.x,
+                    y: draft_a.y + i as u16,
+                    width: draft_a.width,
                     height: 1,
                 },
                 f.buffer_mut(),
@@ -917,29 +898,23 @@ fn keybar_hints(app: &App) -> &'static str {
     if app.wheel {
         return "1..4 content · Esc/m close";
     }
+    // Typing: the editor face. (Standby shows the focused content's
+    // face below — standby IS the default state.)
     if app.focus == Focus::Compose {
-        return match app.compose_mode {
-            // Typing mode: the editor face.
-            ComposeMode::Input => {
-                "<ctrl+enter>/<alt+enter> send · <ctrl+w> drop word · <ctrl+u> clear · <ctrl+v> paste · <ctrl+c> copy · <ctrl+r>/<ctrl+s> file · Esc leave"
-            }
-            // Moving mode: plain hjkl navigates (the content layer is
-            // free here); i returns to typing; Esc hides the composer.
-            ComposeMode::Nav => "hjkl navigate · i type · Esc hide",
-        };
+        return "<ctrl+enter>/<alt+enter> send · <ctrl+w> drop word · <ctrl+u> clear · <ctrl+v> paste · <ctrl+c> copy · <ctrl+r>/<ctrl+s> file · Esc standby";
     }
     match app.regions[app.focus_region()].content {
         ContentKind::Threads => {
-            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
+            "<ctrl+hjkl> navigate · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
-            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
+            "<ctrl+hjkl> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
         }
         ContentKind::Authors => {
-            "r remark · R clear remark · c copy card · s save card · j/k move · Tab cycle · m wheel · L log · ? help · q quit"
+            "r remark · R clear remark · c copy card · s save card · j/k move · m wheel · L log · ? help · q quit"
         }
         ContentKind::Mailboxes => {
-            "a add card · c copy card · s save card · j/k move · Tab cycle · m wheel · L log · ? help · q quit"
+            "a add card · c copy card · s save card · j/k move · m wheel · L log · ? help · q quit"
         }
     }
 }

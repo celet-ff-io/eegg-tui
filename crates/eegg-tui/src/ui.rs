@@ -137,7 +137,7 @@ fn render_wheel(app: &App, f: &mut Frame, region_area: ratatui::prelude::Rect) {
     Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(" wheel \u{00b7} 1-4 content \u{00b7} Esc/o close ")
+                .title(" wheel \u{00b7} 1-4 content \u{00b7} Esc/m close ")
                 .border_style(Color::Magenta),
         )
         .render(area, f.buffer_mut());
@@ -202,7 +202,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         ),
         (true, "Tab", "cycle focus (regions, then the composer)"),
         (true, "1 / 2", "jump straight to region 1 / 2"),
-        (true, "o", "the wheel: switch this region's content"),
+        (true, "m", "the wheel: switch this region's content"),
         (true, "p", "show the mailboxes here"),
         (true, "L", "core log popup (the core's stderr ring)"),
         (true, "q", "quit"),
@@ -212,7 +212,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "1..4",
             "switch this region's content (the current one just closes)",
         ),
-        (true, "Esc / o", "close, no change"),
+        (true, "Esc / m", "close, no change"),
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -915,7 +915,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 fn keybar_hints(app: &App) -> &'static str {
     // The wheel is a modal: its own one-line hint.
     if app.wheel {
-        return "1..4 content · Esc/o close";
+        return "1..4 content · Esc/m close";
     }
     if app.focus == Focus::Compose {
         return match app.compose_mode {
@@ -930,16 +930,16 @@ fn keybar_hints(app: &App) -> &'static str {
     }
     match app.regions[app.focus_region()].content {
         ContentKind::Threads => {
-            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · t refresh · n new thread · Enter open · j/k move · o wheel · L log · ? help · q quit"
+            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · t refresh · n new thread · Enter open · j/k move · m wheel · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
-            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · o wheel · L log · ? help · q quit"
+            "<ctrl+hjkl> navigate · Tab cycle · 1/2 region · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m wheel · L log · ? help · q quit"
         }
         ContentKind::Authors => {
-            "r remark · R clear remark · c copy card · s save card · j/k move · Tab cycle · o wheel · L log · ? help · q quit"
+            "r remark · R clear remark · c copy card · s save card · j/k move · Tab cycle · m wheel · L log · ? help · q quit"
         }
         ContentKind::Mailboxes => {
-            "a add card · c copy card · s save card · j/k move · Tab cycle · o wheel · L log · ? help · q quit"
+            "a add card · c copy card · s save card · j/k move · Tab cycle · m wheel · L log · ? help · q quit"
         }
     }
 }

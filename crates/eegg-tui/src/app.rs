@@ -1137,7 +1137,7 @@ impl App {
         }
 
         // The wheel: a modal over the focused region — 1..4 picks
-        // the content, Esc/o closes without change, the rest is
+        // the content, Esc/m closes without change, the rest is
         // ignored (q is NOT bound: q means quit, everywhere).
         if self.wheel {
             match key.code {

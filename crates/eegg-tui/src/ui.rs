@@ -43,10 +43,19 @@ fn focus_color(app: &App, pane: Pane) -> Color {
 }
 
 pub fn render(app: &mut App, f: &mut Frame) {
+    // The composer is collapsible: its height follows the draft's
+    // line count (1..8 text rows + the borders + the staged line);
+    // collapsed = no rows at all (the surface goes back to reading).
+    let compose_h = if app.show_compose {
+        let rows = app.draft.lines().len().clamp(1, 8) as u16;
+        rows + 3
+    } else {
+        0
+    };
     let [status, main, compose, keybar] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(3),
+        Constraint::Length(compose_h),
         Constraint::Length(1),
     ])
     .areas(f.area());
@@ -117,7 +126,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 45] = [
+    let rows: [(bool, &str, &str); 49] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -136,12 +145,16 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "y", "copy the selected row's text to the clipboard"),
         (true, "w", "save the selected row's text to a file"),
         (false, "compose", ""),
-        (true, "Enter", "send the compose text"),
+        (true, "i", "summon the composer (typing starts immediately)"),
+        (true, "Ctrl-Enter", "send the compose text"),
+        (true, "Alt-Enter", "send the compose text (either works)"),
+        (true, "Enter", "newline (the compose text is multi-line)"),
+        (true, "Ctrl-U", "clear the compose text"),
         (true, "Ctrl-C", "copy the compose text to the clipboard"),
         (true, "Ctrl-V", "paste the clipboard at the caret"),
         (true, "Ctrl-R", "load the compose text from a file"),
         (true, "Ctrl-S", "save the compose text to a file"),
-        (true, "Esc", "clear the compose text"),
+        (true, "Esc", "leave and collapse the composer"),
         (false, "profile", ""),
         (true, "p", "open the profile popup"),
         (true, "Tab", "flip mailboxes \u{2194} authors"),
@@ -702,6 +715,9 @@ fn render_authors_tab(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect
 }
 
 fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
+    if area.height == 0 {
+        return;
+    }
     let staged = match &app.staged {
         Some((content, claims)) => {
             let c = content
@@ -712,52 +728,77 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         }
         None => "staged: (nothing)".into(),
     };
-    // The visible window follows the caret — long lines scroll
-    // horizontally instead of hiding their tail.
-    let text_width = area.width.saturating_sub(4) as usize; // borders + "> "
-    let (visible, caret_col) = if app.focus == Pane::Compose {
-        let scroll = app.input.visual_scroll(text_width);
-        let v: String = app
-            .input
-            .value()
-            .chars()
-            .skip(scroll)
-            .take(text_width)
-            .collect();
-        (v, app.input.visual_cursor() - scroll)
-    } else {
-        (app.input.value().to_owned(), 0)
-    };
-    let inner = if app.focus == Pane::Compose {
-        Line::from(vec![Span::from("> ").yellow(), Span::from(visible)])
-    } else {
-        Line::from(Span::from(visible).dark_gray())
-    };
-    let paragraph = Paragraph::new(vec![inner, Line::from(Span::from(staged).dark_gray())]).block(
-        Block::bordered()
-            .title(" compose ")
-            .border_style(focus_color(app, Pane::Compose)),
-    );
-    paragraph.render(area, f.buffer_mut());
+    let block = Block::bordered()
+        .title(" compose ")
+        .border_style(focus_color(app, Pane::Compose));
+    let inner = block.inner(area);
+    block.render(area, f.buffer_mut());
+    let rows = app.draft.lines().len().clamp(1, 8) as u16;
+    let [text_a, staged_a] = Layout::vertical([Constraint::Length(rows), Constraint::Min(0)])
+        .areas(inner);
+    let width = text_a.width as usize;
+    let lines = app.draft.lines();
     if app.focus == Pane::Compose {
-        // The terminal cursor tracks the input caret: the text starts
-        // two spans in (the border, then the "> " prompt), so the
-        // caret cell is x + 3 + caret — one cell AFTER the last typed
-        // character, never on it.
-        f.set_cursor_position((area.x + 3 + caret_col as u16, area.y + 1));
+        // The caret rides a following viewport: vertical scroll keeps
+        // the caret's row on screen; the caret's row also scrolls
+        // horizontally when it runs past the width.
+        let (crow, ccol) = app.draft.cursor();
+        let top = crow.saturating_sub(rows as usize - 1);
+        for (i, line) in lines
+            .iter()
+            .skip(top)
+            .take(rows as usize)
+            .enumerate()
+        {
+            let row_no = top + i;
+            let off = if row_no == crow {
+                ccol.saturating_sub(width.saturating_sub(1))
+            } else {
+                0
+            };
+            let visible: String = line.chars().skip(off).take(width).collect();
+            Line::from(Span::from(visible)).render(
+                ratatui::prelude::Rect {
+                    x: text_a.x,
+                    y: text_a.y + i as u16,
+                    width: text_a.width,
+                    height: 1,
+                },
+                f.buffer_mut(),
+            );
+        }
+        // The caret cell: one cell AFTER the last typed character,
+        // never on it.
+        let caret_x = text_a.x
+            + (ccol.saturating_sub(ccol.saturating_sub(width.saturating_sub(1))) as u16);
+        f.set_cursor_position((caret_x, text_a.y + (crow - top) as u16));
+    } else {
+        for (i, line) in lines.iter().take(rows as usize).enumerate() {
+            let visible: String = line.chars().take(width).collect();
+            Line::from(Span::from(visible).dark_gray()).render(
+                ratatui::prelude::Rect {
+                    x: text_a.x,
+                    y: text_a.y + i as u16,
+                    width: text_a.width,
+                    height: 1,
+                },
+                f.buffer_mut(),
+            );
+        }
     }
+    Paragraph::new(Span::from(staged).dark_gray()).render(staged_a, f.buffer_mut());
 }
 
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match app.focus {
         Pane::Threads => {
-            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+            "t refresh \u{00b7} n new thread \u{00b7} i compose \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Transcript => {
-            "j/k scroll \u{00b7} n new thread \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} h left \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+            "j/k scroll \u{00b7} n new thread \u{00b7} i compose \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} h left \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Compose => {
-            "Enter send \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc clear \u{00b7} Tab next"
+            "Ctrl/Alt-Enter send \u{00b7} Enter newline \u{00b7} Ctrl-U clear \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc leave"
         }
     };
     Paragraph::new(Span::from(hints).dark_gray())

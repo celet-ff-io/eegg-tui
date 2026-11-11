@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, VecDeque};
 use ratatui::widgets::ListState;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as _;
+
+use crate::draft::Draft;
 use zconned_material::{CLAIM_KIND_TS, MsgRef, Value};
 use zconned_stdio_types::{
     Entry, Error as FrameError, Fresh, IdentitiesGet, IdentityRemarkReset, IdentityRemarkSet,
@@ -75,7 +77,12 @@ pub struct App {
     /// The thread whose log the transcript currently shows (the reply
     /// base and the arrival-routing hint).
     pub open_thread: Option<MsgRef>,
-    pub input: Input,
+    /// The multi-line compose draft (the local editor state; the
+    /// single-line boxes below keep tui-input).
+    pub draft: Draft,
+    /// The compose surface is summoned/collapsed (the composer is
+    /// hard to leave — leaving and re-summoning are explicit keys).
+    pub show_compose: bool,
     /// The staged commit base (from msg_cursor_push; empty = not set).
     pub cursor: Vec<MsgRef>,
     /// Set by the new-thread key: the next send starts a FRESH chain
@@ -244,7 +251,8 @@ impl App {
             entries: Vec::new(),
             transcript_sel: ListState::default(),
             open_thread: None,
-            input: Input::default(),
+            draft: Draft::new(),
+            show_compose: true,
             cursor: Vec::new(),
             new_thread_intent: false,
             staged: None,
@@ -330,7 +338,15 @@ impl App {
     fn cycle_focus(&mut self) {
         self.focus = match self.focus {
             Pane::Threads => Pane::Transcript,
-            Pane::Transcript => Pane::Compose,
+            // The collapsed composer is out of the cycle; `i`
+            // summons it.
+            Pane::Transcript => {
+                if self.show_compose {
+                    Pane::Compose
+                } else {
+                    Pane::Threads
+                }
+            }
             Pane::Compose => Pane::Threads,
         };
     }
@@ -440,14 +456,14 @@ impl App {
 
     /// The MAIN-window file-path box: Enter acts, Esc cancels.
     fn on_key_file_box(&mut self, key: ratatui::crossterm::event::KeyEvent) {
-        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent};
+        use ratatui::crossterm::event::{Event, KeyCode};
         match key.code {
             KeyCode::Enter => {
                 let path = self.expanded_path();
                 match (self.file_box, path) {
                     (_, None) => self.flash = Some("no path given".into()),
                     (FileBox::SaveCompose, Some(p)) => {
-                        let body = self.input.value().to_owned();
+                        let body = self.draft.text();
                         match std::fs::write(&p, format!("{body}\n")) {
                             Ok(()) => {
                                 self.flash = Some(format!("saved to {}", p.display()));
@@ -459,11 +475,9 @@ impl App {
                     }
                     (FileBox::LoadCompose, Some(p)) => match std::fs::read_to_string(&p) {
                         Ok(text) => {
-                            self.input.reset();
-                            for c in text.trim_end_matches(['\r', '\n']).chars() {
-                                self.input
-                                    .handle_event(&Event::Key(KeyEvent::from(KeyCode::Char(c))));
-                            }
+                            self.draft.clear();
+                            self.draft
+                                .insert_str(text.trim_end_matches(['\r', '\n']));
                             self.flash = Some("compose loaded from file".into());
                             self.file_input.reset();
                             self.file_box = FileBox::None;
@@ -511,16 +525,20 @@ impl App {
         })
     }
 
-    /// Enter on the compose pane: the commit flow, one hand-typed
-    /// frame per step (cursor → content → commit). An unset cursor
-    /// replies to the OPEN thread (at = its tip); with no open thread
-    /// (or a new-thread intent) it starts a fresh chain.
+    /// The send face of the composer (Ctrl/Alt-Enter): the commit
+    /// flow, one hand-typed frame per step (cursor → content →
+    /// commit). An unset cursor replies to the OPEN thread (at = its
+    /// tip); with no open thread (or a new-thread intent) it starts a
+    /// fresh chain. Sending collapses the composer — the text is on
+    /// its way, the pane goes back to the reading surface.
     fn compose_send(&mut self) {
-        let text = self.input.value().trim().to_owned();
+        let text = self.draft.text().trim().to_owned();
         if text.is_empty() {
             return;
         }
-        self.input.reset();
+        self.draft.clear();
+        self.show_compose = false;
+        self.focus = Pane::Transcript;
         // The timestamp discipline: the interface keeps the
         // "stamped" state (a stamp within the last window). When the
         // state is down, a stamp MESSAGE commits first and the text
@@ -889,7 +907,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
-        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent};
+        use ratatui::crossterm::event::KeyCode;
 
         // Dead-core posture: nothing but the way out.
         if !self.core_alive {
@@ -952,13 +970,28 @@ impl App {
             use ratatui::crossterm::event::KeyModifiers;
             match key.code {
                 KeyCode::Tab => self.cycle_focus(),
-                KeyCode::Esc => self.input.reset(),
-                KeyCode::Enter => self.compose_send(),
+                // Leaving the composer collapses it — the pane goes
+                // back to the reading surface; `i` summons it again.
+                KeyCode::Esc => {
+                    self.show_compose = false;
+                    self.focus = Pane::Transcript;
+                }
+                // Send: Ctrl-Enter or Alt-Enter. Legacy terminals
+                // encode Ctrl-Enter as Ctrl-J — accepted as a third
+                // spelling of the same intent. Plain Enter is a
+                // newline (the draft is multi-line first-class).
+                KeyCode::Enter if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    self.compose_send();
+                }
+                KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.compose_send();
+                }
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => self.draft.clear(),
                 // The compose channels: copy/paste through the
                 // clipboard (may be unavailable), read/write through
                 // a file (always available).
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let text = self.input.value().trim().to_owned();
+                    let text = self.draft.text().trim().to_owned();
                     self.flash = Some(if text.is_empty() {
                         "nothing to copy".into()
                     } else {
@@ -972,10 +1005,8 @@ impl App {
                 KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match clipboard::get() {
                         Ok(text) => {
-                            for c in text.trim_end_matches(['\r', '\n']).chars() {
-                                self.input
-                                    .handle_event(&Event::Key(KeyEvent::from(KeyCode::Char(c))));
-                            }
+                            self.draft
+                                .insert_str(text.trim_end_matches(['\r', '\n']));
                             self.flash = Some("pasted from clipboard".into());
                         }
                         Err(reason) => self.flash = Some(reason),
@@ -990,7 +1021,7 @@ impl App {
                     self.file_box = FileBox::SaveCompose;
                 }
                 _ => {
-                    self.input.handle_event(&Event::Key(key));
+                    self.draft.handle_key(key);
                 }
             }
             return;
@@ -1040,8 +1071,15 @@ impl App {
             // even though a thread transcript is open.
             KeyCode::Char('n') => {
                 self.new_thread_intent = true;
+                self.show_compose = true;
                 self.focus = Pane::Compose;
                 self.flash = Some("new thread".into());
+            }
+            // Summon the composer (leaving it was Esc — symmetric
+            // entry; typing starts immediately).
+            KeyCode::Char('i') => {
+                self.show_compose = true;
+                self.focus = Pane::Compose;
             }
             // The core's stderr ring — the diagnosis window (a talky
             // core: --core "zconned -v").
@@ -1366,10 +1404,20 @@ pub fn short_hex(b: &[u8]) -> String {
 
 pub fn preview_bytes(data: &[u8]) -> String {
     let lossy = String::from_utf8_lossy(data).into_owned();
-    let text = if lossy.chars().any(|c| c.is_control()) {
-        format!("{:02x?}", &data[..data.len().min(8)])
-    } else {
+    // Newlines/tabs are PRINTABLE here (the drafts are multi-line);
+    // they render as visible marks instead of breaking the row or
+    // falling back to the hex preview.
+    let printable = lossy
+        .chars()
+        .filter(|c| !matches!(c, '\n' | '\r' | '\t'))
+        .all(|c| !c.is_control());
+    let text = if printable {
         lossy
+            .replace('\r', "")
+            .replace('\n', " \u{23ce} ")
+            .replace('\t', " \u{2423} ")
+    } else {
+        format!("{:02x?}", &data[..data.len().min(8)])
     };
     let count = text.chars().count();
     if count > 48 {

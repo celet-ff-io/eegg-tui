@@ -45,10 +45,19 @@ fn focus_color(app: &App, pane: Pane) -> Color {
 }
 
 pub fn render(app: &mut App, f: &mut Frame) {
+    // The keybar's height follows its hint lines (1 normally, 2 when
+    // the hints wrapped) — the wrap decision needs the width and the
+    // extra-info reservation BEFORE the layout, so measure first.
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let hint_lines = keybar_lines(
+        keybar_hints(app),
+        f.area().width,
+        version.chars().count() as u16 + 2,
+    );
     let [status, main, keybar] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(hint_lines.len() as u16),
     ])
     .areas(f.area());
     let [threads, transcript] =
@@ -61,17 +70,14 @@ pub fn render(app: &mut App, f: &mut Frame) {
     // the log above, the compose below).
     if app.show_compose {
         let rows = app.draft.lines().len().clamp(1, 8) as u16;
-        let [t_area, c_area] = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(rows + 3),
-        ])
-        .areas(transcript);
+        let [t_area, c_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(rows + 3)]).areas(transcript);
         render_transcript(app, f, t_area);
         render_compose(app, f, c_area);
     } else {
         render_transcript(app, f, transcript);
     }
-    render_keybar(app, f, keybar);
+    render_keybar(f, keybar, &hint_lines, &version);
     if app.show_peers {
         render_peers_popup(app, f);
     }
@@ -831,8 +837,8 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     Paragraph::new(Span::from(staged).dark_gray()).render(staged_a, f.buffer_mut());
 }
 
-fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
-    let hints = match (app.focus, app.compose_mode) {
+fn keybar_hints(app: &App) -> &'static str {
+    match (app.focus, app.compose_mode) {
         (Pane::Threads, _) => {
             "<ctrl+hjkl> navigate \u{00b7} t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
         }
@@ -846,29 +852,86 @@ fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         // Moving mode: plain hjkl navigates (the content layer is
         // free here); i returns to typing; Esc hides the composer.
         (Pane::Compose, ComposeMode::Nav) => "hjkl navigate \u{00b7} i type \u{00b7} Esc hide",
-    };
-    // Three visible levels: the KEYS stand out (yellow), the
-    // descriptions read at plain gray, and the middle-dot
-    // separators recede (dark gray — deliberately harder to see).
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, seg) in hints.split(" \u{00b7} ").enumerate() {
-        if i > 0 {
-            spans.push(Span::from(" \u{00b7} ").dark_gray());
-        }
-        match seg.split_once(' ') {
-            Some((k, d)) => {
-                spans.push(Span::from(k.to_owned()).yellow());
-                spans.push(Span::from(format!(" {d}")).gray());
+    }
+}
+
+/// One hint segment as styled spans: the KEY stands out (orange,
+/// bold — a distinct hue from the borders' yellow), the description
+/// reads at the plain dark gray.
+fn hint_spans(seg: &str) -> Vec<Span<'static>> {
+    const KEY: Style = Style::new().fg(Color::Indexed(208)).bold();
+    match seg.split_once(' ') {
+        Some((k, d)) => vec![
+            Span::styled(k.to_owned(), KEY),
+            Span::styled(format!(" {d}"), Style::new().dark_gray()),
+        ],
+        None => vec![Span::styled(seg.to_owned(), KEY)],
+    }
+}
+
+/// The keybar's hint lines, laid out with the right-corner extra
+/// info taken into account: every line reserves the extra's width
+/// plus a gap (`a`); a segment crossing the reserved edge wraps to
+/// the next line (which also means the extra info will not sit on
+/// the wrapped-from line); once on the SECOND line, an overflowing
+/// segment truncates the previous one into "…" and ends the hints —
+/// they never grow past two lines.
+fn keybar_lines(hints: &str, x: u16, a: u16) -> Vec<Vec<Span<'static>>> {
+    let limit = x.saturating_sub(a);
+    let mut lines: Vec<Vec<Span>> = vec![Vec::new()];
+    let mut used: u16 = 0;
+    let mut seg_start: usize = 0; // the last segment's first span index
+    for seg in hints.split(" \u{00b7} ") {
+        let spans = hint_spans(seg);
+        let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+        let sep_w = if used == 0 { 0 } else { 3 }; // " · "
+        if used + sep_w + w > limit {
+            if lines.len() >= 2 {
+                // Second line and still overflowing: the previous
+                // hint becomes "…" and the hints end here.
+                let line = lines.last_mut().expect("the second line exists");
+                line.truncate(seg_start);
+                line.push(Span::styled("\u{2026}".to_owned(), Style::new().dark_gray()));
+                break;
             }
-            None => spans.push(Span::from(seg.to_owned()).gray()),
+            lines.push(Vec::new());
+            lines.last_mut().expect("just pushed").extend(spans);
+            used = w;
+            seg_start = 0;
+            continue;
+        }
+        let line = lines.last_mut().expect("the current line");
+        seg_start = line.len();
+        if used > 0 {
+            line.push(Span::styled(" \u{00b7} ".to_owned(), Style::new().dark_gray()));
+        }
+        line.extend(spans);
+        used += sep_w + w;
+    }
+    lines
+}
+
+fn render_keybar(
+    f: &mut Frame,
+    area: ratatui::prelude::Rect,
+    lines: &[Vec<Span<'static>>],
+    version: &str,
+) {
+    for (i, line) in lines.iter().enumerate() {
+        let row = ratatui::prelude::Rect {
+            x: area.x,
+            y: area.y + i as u16,
+            width: area.width,
+            height: 1,
+        };
+        Paragraph::new(Line::from(line.clone())).render(row, f.buffer_mut());
+        if i + 1 == lines.len() {
+            // The right-corner extra info (italic, the color it had)
+            // rides the LAST hint line — every line reserved its
+            // width plus the gap, so it never covers a hint.
+            Paragraph::new(Span::styled(version.to_owned(), Style::new().dark_gray().italic()))
+                .alignment(Alignment::Right)
+                .render(row, f.buffer_mut());
         }
     }
-    Paragraph::new(Line::from(spans))
-        .centered()
-        .render(area, f.buffer_mut());
-    // The lazygit touch: the version lives in the bottom-right corner
-    // (compile-time — the crate version, the single version carrier).
-    Paragraph::new(Span::from(format!("v{}", env!("CARGO_PKG_VERSION"))).dark_gray())
-        .alignment(Alignment::Right)
-        .render(area, f.buffer_mut());
 }

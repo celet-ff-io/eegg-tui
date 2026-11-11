@@ -67,6 +67,16 @@ pub enum Pane {
     Compose,
 }
 
+/// The composer's two modes: typing (the editor face) and moving
+/// (the structural face — Esc steps out of typing into it, where
+/// plain hjkl navigates; any navigation back in returns to typing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ComposeMode {
+    #[default]
+    Input,
+    Nav,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub focus: Pane,
@@ -83,6 +93,12 @@ pub struct App {
     /// The compose surface is summoned/collapsed (the composer is
     /// hard to leave — leaving and re-summoning are explicit keys).
     pub show_compose: bool,
+    /// The composer's mode: typing vs the structural face (Esc
+    /// steps between them; navigation back in returns to typing).
+    pub compose_mode: ComposeMode,
+    /// The transcript viewport's row count at the last render —
+    /// the PgUp/PgDn page.
+    pub viewport_rows: u16,
     /// The staged commit base (from msg_cursor_push; empty = not set).
     pub cursor: Vec<MsgRef>,
     /// Set by the new-thread key: the next send starts a FRESH chain
@@ -253,6 +269,8 @@ impl App {
             open_thread: None,
             draft: Draft::new(),
             show_compose: false,
+            compose_mode: ComposeMode::Input,
+            viewport_rows: 0,
             cursor: Vec::new(),
             new_thread_intent: false,
             staged: None,
@@ -349,6 +367,46 @@ impl App {
             }
             Pane::Compose => Pane::Threads,
         };
+        self.entered_compose();
+    }
+
+    /// The reverse cycle (Ctrl+k / plain k in the composer's moving
+    /// mode): compose → transcript → threads → compose.
+    fn cycle_focus_back(&mut self) {
+        self.focus = match self.focus {
+            Pane::Compose => Pane::Transcript,
+            Pane::Transcript => Pane::Threads,
+            Pane::Threads => {
+                if self.show_compose {
+                    Pane::Compose
+                } else {
+                    Pane::Transcript
+                }
+            }
+        };
+        self.entered_compose();
+    }
+
+    /// Landing on the composer through NAVIGATION returns it to the
+    /// typing mode (the draft is untouched — only the face swaps).
+    fn entered_compose(&mut self) {
+        if self.focus == Pane::Compose {
+            self.compose_mode = ComposeMode::Input;
+        }
+    }
+
+    /// Direct structural jumps (Ctrl+h/l and the composer's moving
+    /// mode).
+    fn nav_to(&mut self, pane: Pane) {
+        self.focus = pane;
+        self.entered_compose();
+    }
+
+    /// PgUp/PgDn: the selection moves by a page (the last render's
+    /// transcript viewport height; a sane page before first paint).
+    fn page_sel(&mut self, dir: isize) {
+        let page = self.viewport_rows.max(2) as isize - 1;
+        self.move_sel(dir * page);
     }
 
     fn move_sel(&mut self, delta: isize) {
@@ -530,6 +588,99 @@ impl App {
     /// tip); with no open thread (or a new-thread intent) it starts a
     /// fresh chain. Sending collapses the composer — the text is on
     /// its way, the pane goes back to the reading surface.
+    /// The composer's key face: the structural layer first (Ctrl+hjkl
+    /// works in BOTH modes), then the mode's own face — typing runs
+    /// the editor, moving hands plain hjkl to the structure.
+    fn on_key_compose(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            match key.code {
+                KeyCode::Char('h') => self.nav_to(Pane::Threads),
+                KeyCode::Char('l') => self.nav_to(Pane::Transcript),
+                KeyCode::Char('j') => self.cycle_focus(),
+                KeyCode::Char('k') => self.cycle_focus_back(),
+                _ => return,
+            }
+            return;
+        }
+        match (self.compose_mode, key.code) {
+            // The moving mode: the content layer is FREE here, so
+            // plain hjkl navigates too; Esc hides; i returns to
+            // typing.
+            (ComposeMode::Nav, KeyCode::Esc) => {
+                self.show_compose = false;
+                self.focus = Pane::Transcript;
+                self.compose_mode = ComposeMode::Input;
+            }
+            (ComposeMode::Nav, KeyCode::Char('h')) => self.nav_to(Pane::Threads),
+            (ComposeMode::Nav, KeyCode::Char('l')) => self.nav_to(Pane::Transcript),
+            (ComposeMode::Nav, KeyCode::Char('j')) => self.cycle_focus(),
+            (ComposeMode::Nav, KeyCode::Char('k')) => self.cycle_focus_back(),
+            (ComposeMode::Nav, KeyCode::Char('i')) => self.compose_mode = ComposeMode::Input,
+            (ComposeMode::Nav, _) => {}
+            // The typing mode: the editor face. Enter is a newline;
+            // Ctrl-Enter / Alt-Enter send (the legacy Ctrl-J spelling
+            // is retired — Ctrl+J navigates).
+            (ComposeMode::Input, KeyCode::Tab) => self.cycle_focus(),
+            (ComposeMode::Input, KeyCode::Esc) => self.compose_mode = ComposeMode::Nav,
+            (ComposeMode::Input, KeyCode::Enter)
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.compose_send();
+            }
+            (ComposeMode::Input, KeyCode::Char('u'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.draft.clear();
+            }
+            // The compose channels: copy/paste through the clipboard
+            // (may be unavailable), read/write through a file (always
+            // available).
+            (ComposeMode::Input, KeyCode::Char('c'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                let text = self.draft.text().trim().to_owned();
+                self.flash = Some(if text.is_empty() {
+                    "nothing to copy".into()
+                } else {
+                    clipboard::set(&text)
+                        .map(|()| "compose copied to clipboard".to_owned())
+                        .unwrap_or_else(|reason| format!("{reason} — use Ctrl-S to save a file"))
+                });
+            }
+            (ComposeMode::Input, KeyCode::Char('v'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                match clipboard::get() {
+                    Ok(text) => {
+                        self.draft.insert_str(text.trim_end_matches(['\r', '\n']));
+                        self.flash = Some("pasted from clipboard".into());
+                    }
+                    Err(reason) => self.flash = Some(reason),
+                }
+            }
+            (ComposeMode::Input, KeyCode::Char('r'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.file_input.reset();
+                self.file_box = FileBox::LoadCompose;
+            }
+            (ComposeMode::Input, KeyCode::Char('s'))
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.file_input.reset();
+                self.file_box = FileBox::SaveCompose;
+            }
+            (ComposeMode::Input, _) => {
+                self.draft.handle_key(key);
+            }
+        }
+    }
+
     fn compose_send(&mut self) {
         let text = self.draft.text().trim().to_owned();
         if text.is_empty() {
@@ -538,6 +689,7 @@ impl App {
         self.draft.clear();
         self.show_compose = false;
         self.focus = Pane::Transcript;
+        self.compose_mode = ComposeMode::Input;
         // The timestamp discipline: the interface keeps the
         // "stamped" state (a stamp within the last window). When the
         // state is down, a stamp MESSAGE commits first and the text
@@ -906,7 +1058,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
-        use ratatui::crossterm::event::KeyCode;
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         // Dead-core posture: nothing but the way out.
         if !self.core_alive {
@@ -966,66 +1118,7 @@ impl App {
         }
 
         if self.focus == Pane::Compose {
-            use ratatui::crossterm::event::KeyModifiers;
-            match key.code {
-                KeyCode::Tab => self.cycle_focus(),
-                // Leaving the composer collapses it — the pane goes
-                // back to the reading surface; `i` summons it again.
-                KeyCode::Esc => {
-                    self.show_compose = false;
-                    self.focus = Pane::Transcript;
-                }
-                // Send: Ctrl-Enter or Alt-Enter. Legacy terminals
-                // encode Ctrl-Enter as Ctrl-J — accepted as a third
-                // spelling of the same intent. Plain Enter is a
-                // newline (the draft is multi-line first-class).
-                KeyCode::Enter
-                    if key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    self.compose_send();
-                }
-                KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
-                    self.compose_send();
-                }
-                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => self.draft.clear(),
-                // The compose channels: copy/paste through the
-                // clipboard (may be unavailable), read/write through
-                // a file (always available).
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let text = self.draft.text().trim().to_owned();
-                    self.flash = Some(if text.is_empty() {
-                        "nothing to copy".into()
-                    } else {
-                        clipboard::set(&text)
-                            .map(|()| "compose copied to clipboard".to_owned())
-                            .unwrap_or_else(|reason| {
-                                format!("{reason} — use Ctrl-S to save a file")
-                            })
-                    });
-                }
-                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    match clipboard::get() {
-                        Ok(text) => {
-                            self.draft.insert_str(text.trim_end_matches(['\r', '\n']));
-                            self.flash = Some("pasted from clipboard".into());
-                        }
-                        Err(reason) => self.flash = Some(reason),
-                    }
-                }
-                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.file_input.reset();
-                    self.file_box = FileBox::LoadCompose;
-                }
-                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.file_input.reset();
-                    self.file_box = FileBox::SaveCompose;
-                }
-                _ => {
-                    self.draft.handle_key(key);
-                }
-            }
+            self.on_key_compose(key);
             return;
         }
 
@@ -1035,6 +1128,22 @@ impl App {
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab => self.cycle_focus(),
+            // The structural layer: Ctrl+hjkl navigates from ANY
+            // focus (plain hjkl belongs to the focused content: the
+            // lists scroll, the composer types).
+            KeyCode::Char('h') if key.modifiers == KeyModifiers::CONTROL => {
+                self.nav_to(Pane::Threads)
+            }
+            KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
+                self.nav_to(Pane::Transcript)
+            }
+            KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus(),
+            KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => {
+                self.cycle_focus_back()
+            }
+            // The transcript pages by the last rendered viewport.
+            KeyCode::PageUp if self.focus == Pane::Transcript => self.page_sel(-1),
+            KeyCode::PageDown if self.focus == Pane::Transcript => self.page_sel(1),
             // The horizontal pane navigation (lazygit-style): h = the
             // left panel, l = the right one. The compose pane stays
             // Tab-only — h/j/k/l type literal text while composing.

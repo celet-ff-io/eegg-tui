@@ -88,6 +88,30 @@ impl Draft {
         }
     }
 
+    /// Ctrl-W: delete the run of characters before the caret — the
+    /// trailing whitespace first, then the word itself. At the line
+    /// start it joins the previous row (the backspace behavior).
+    fn delete_word_back(&mut self) {
+        let (row, col) = self.cursor;
+        let chars: Vec<char> = self.lines[row].chars().collect();
+        let mut i = col;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        if i < col {
+            let line = &mut self.lines[row];
+            let start = Self::byte_col(line, i);
+            let end = Self::byte_col(line, col);
+            line.replace_range(start..end, "");
+            self.cursor.1 = i;
+        } else if col == 0 && row > 0 {
+            self.backspace();
+        }
+    }
+
     fn delete(&mut self) {
         let (row, col) = self.cursor;
         let len = self.lines[row].chars().count();
@@ -135,9 +159,17 @@ impl Draft {
                 self.cursor.0 = (row + 1).min(self.lines.len() - 1);
                 self.clamp_col();
             }
-            (KeyCode::Home, m) if m.contains(KeyModifiers::CONTROL) => self.cursor.1 = 0,
+            (KeyCode::Home, m) if m.contains(KeyModifiers::CONTROL) => {
+                self.cursor = (0, 0);
+            }
             (KeyCode::End, m) if m.contains(KeyModifiers::CONTROL) => {
-                self.cursor.1 = self.lines[row].chars().count();
+                let last = self.lines.len() - 1;
+                self.cursor = (last, self.lines[last].chars().count());
+            }
+            (KeyCode::Home, _) => self.cursor.1 = 0,
+            (KeyCode::End, _) => self.cursor.1 = self.lines[row].chars().count(),
+            (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.delete_word_back();
             }
             _ => return false,
         }
@@ -213,5 +245,38 @@ mod tests {
         assert_eq!(d.cursor(), (0, 1)); // the col rides the shorter row
         d.handle_key(key(KeyCode::Down));
         assert_eq!(d.cursor(), (1, 1));
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_w_deletes_the_last_word() {
+        let mut d = Draft::new();
+        d.insert_str("hello world  ");
+        d.handle_key(ctrl(KeyCode::Char('w')));
+        assert_eq!(d.lines(), ["hello "]);
+        d.handle_key(ctrl(KeyCode::Char('w')));
+        assert_eq!(d.lines(), [""]);
+        // At the line start it joins the previous row.
+        d.insert_str("a\nb");
+        d.handle_key(key(KeyCode::Home));
+        d.handle_key(ctrl(KeyCode::Char('w')));
+        assert_eq!(d.lines(), ["a"]);
+    }
+
+    #[test]
+    fn home_end_ride_the_line_ctrl_rides_the_document() {
+        let mut d = Draft::new();
+        d.insert_str("long line\nshort");
+        d.handle_key(key(KeyCode::Home));
+        assert_eq!(d.cursor(), (1, 0));
+        d.handle_key(key(KeyCode::End));
+        assert_eq!(d.cursor(), (1, 5));
+        d.handle_key(ctrl(KeyCode::Home));
+        assert_eq!(d.cursor(), (0, 0));
+        d.handle_key(ctrl(KeyCode::End));
+        assert_eq!(d.cursor(), (1, 5));
     }
 }

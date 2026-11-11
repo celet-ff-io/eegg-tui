@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use crate::app::{App, CardFlow, Pane, ProfileTab, anchor_of, preview_bytes, short_hex};
+use crate::app::{App, CardFlow, ComposeMode, Pane, ProfileTab, anchor_of, preview_bytes, short_hex};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -126,7 +126,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 48] = [
+    let rows: [(bool, &str, &str); 54] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -140,20 +140,25 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "the row's author; \u{270d} = roster-confirmed",
         ),
         (true, "j / k \u{2191}\u{2193}", "scroll"),
+        (true, "PgUp/PgDn", "page by a screen"),
         (true, "n", "new thread (fresh chain on the next send)"),
         (true, "r", "re-stage the draft"),
         (true, "y", "copy the selected row's text to the clipboard"),
         (true, "w", "save the selected row's text to a file"),
         (false, "compose", ""),
-        (true, "i", "summon the composer (typing starts immediately)"),
+        (true, "i", "summon the composer (transcript only; typing mode)"),
         (true, "Ctrl-Enter", "send the compose text"),
         (true, "Alt-Enter", "send the compose text (either works)"),
+        (true, "Ctrl-W", "drop the word before the caret"),
+        (true, "Home / End", "line start / end (Ctrl+ = the whole draft)"),
         (true, "Ctrl-U", "clear the compose text"),
         (true, "Ctrl-C", "copy the compose text to the clipboard"),
         (true, "Ctrl-V", "paste the clipboard at the caret"),
         (true, "Ctrl-R", "load the compose text from a file"),
         (true, "Ctrl-S", "save the compose text to a file"),
-        (true, "Esc", "leave and collapse the composer"),
+        (true, "Esc", "typing → moving; again = hide the composer"),
+        (true, "hjkl (moving)", "navigate while the composer is in the moving mode"),
+        (true, "i (moving)", "back to typing"),
         (false, "profile", ""),
         (true, "p", "open the profile popup"),
         (true, "Tab", "flip mailboxes \u{2194} authors"),
@@ -187,6 +192,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "r", "set the selected identity's remark"),
         (true, "R", "clear the selected identity's remark"),
         (false, "global", ""),
+        (
+            true,
+            "Ctrl-h/j/k/l",
+            "navigate from anywhere (plain hjkl belongs to the focused content)",
+        ),
         (
             true,
             "Tab",
@@ -546,6 +556,9 @@ fn render_transcript(app: &mut App, f: &mut Frame, area: ratatui::prelude::Rect)
                 .border_style(focus_color(app, Pane::Transcript)),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    // The viewport height feeds the PgUp/PgDn page (the page is what
+    // the terminal actually showed at the last paint).
+    app.viewport_rows = area.height.saturating_sub(2);
     ratatui::widgets::StatefulWidget::render(&list, area, f.buffer_mut(), &mut app.transcript_sel);
 }
 
@@ -727,9 +740,14 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         }
         None => "staged: (nothing)".into(),
     };
-    let block = Block::bordered()
-        .title(" compose ")
-        .border_style(focus_color(app, Pane::Compose));
+    // The moving mode is visibly distinct: a cyan border + the ·nav·
+    // title, so the double-Esc (leave → hide) is never a surprise.
+    let (title, border) = if app.compose_mode == ComposeMode::Nav {
+        (" compose ·nav· ", Color::Cyan)
+    } else {
+        (" compose ", focus_color(app, Pane::Compose))
+    };
+    let block = Block::bordered().title(title).border_style(border);
     let inner = block.inner(area);
     block.render(area, f.buffer_mut());
     let rows = app.draft.lines().len().clamp(1, 8) as u16;
@@ -737,7 +755,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(inner);
     let width = text_a.width as usize;
     let lines = app.draft.lines();
-    if app.focus == Pane::Compose {
+    if app.focus == Pane::Compose && app.compose_mode == ComposeMode::Input {
         // The caret rides a following viewport: vertical scroll keeps
         // the caret's row on screen; the caret's row also scrolls
         // horizontally when it runs past the width.
@@ -767,9 +785,24 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
             text_a.x + (ccol.saturating_sub(ccol.saturating_sub(width.saturating_sub(1))) as u16);
         f.set_cursor_position((caret_x, text_a.y + (crow - top) as u16));
     } else {
-        for (i, line) in lines.iter().take(rows as usize).enumerate() {
+        // Unfocused = dimmed; focused-but-moving = normal color (the
+        // face swap is already visible on the border/title). The
+        // window still follows the caret row when focused.
+        let dim = app.focus != Pane::Compose;
+        let top = if dim {
+            0
+        } else {
+            app.draft.cursor().0.saturating_sub(rows as usize - 1)
+        };
+        for (i, line) in lines
+            .iter()
+            .skip(top)
+            .take(rows as usize)
+            .enumerate()
+        {
             let visible: String = line.chars().take(width).collect();
-            Line::from(Span::from(visible).dark_gray()).render(
+            let span = Span::from(visible);
+            Line::from(if dim { span.dark_gray() } else { span }).render(
                 ratatui::prelude::Rect {
                     x: text_a.x,
                     y: text_a.y + i as u16,
@@ -784,15 +817,21 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 }
 
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
-    let hints = match app.focus {
-        Pane::Threads => {
-            "t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+    let hints = match (app.focus, app.compose_mode) {
+        (Pane::Threads, _) => {
+            "Ctrl-h/j/k/l navigate \u{00b7} t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
         }
-        Pane::Transcript => {
-            "j/k scroll \u{00b7} n new thread \u{00b7} i compose \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} h left \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
+        (Pane::Transcript, _) => {
+            "Ctrl-h/j/k/l navigate \u{00b7} j/k scroll \u{00b7} PgUp/PgDn page \u{00b7} n new thread \u{00b7} i compose \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
         }
-        Pane::Compose => {
-            "Ctrl/Alt-Enter send \u{00b7} Ctrl-U clear \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc leave"
+        // Typing mode: the editor face.
+        (Pane::Compose, ComposeMode::Input) => {
+            "Ctrl/Alt-Enter send \u{00b7} Ctrl-W drop word \u{00b7} Ctrl-U clear \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc leave"
+        }
+        // Moving mode: plain hjkl navigates (the content layer is
+        // free here); i returns to typing; Esc hides the composer.
+        (Pane::Compose, ComposeMode::Nav) => {
+            "hjkl navigate \u{00b7} i type \u{00b7} Esc hide"
         }
     };
     Paragraph::new(Span::from(hints).dark_gray())

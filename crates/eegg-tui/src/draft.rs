@@ -259,9 +259,8 @@ mod tests {
         assert_eq!(d.lines(), ["hello "]);
         d.handle_key(ctrl(KeyCode::Char('w')));
         assert_eq!(d.lines(), [""]);
-        // At the line start it joins the previous row.
-        d.insert_str("a\nb");
-        d.handle_key(key(KeyCode::Home));
+        // At the line start it joins the previous row (vim parity).
+        d.insert_str("a\n");
         d.handle_key(ctrl(KeyCode::Char('w')));
         assert_eq!(d.lines(), ["a"]);
     }

@@ -45,19 +45,9 @@ fn focus_color(app: &App, pane: Pane) -> Color {
 }
 
 pub fn render(app: &mut App, f: &mut Frame) {
-    // The composer is collapsible: its height follows the draft's
-    // line count (1..8 text rows + the borders + the staged line);
-    // collapsed = no rows at all (the surface goes back to reading).
-    let compose_h = if app.show_compose {
-        let rows = app.draft.lines().len().clamp(1, 8) as u16;
-        rows + 3
-    } else {
-        0
-    };
-    let [status, main, compose, keybar] = Layout::vertical([
+    let [status, main, keybar] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(compose_h),
         Constraint::Length(1),
     ])
     .areas(f.area());
@@ -66,8 +56,21 @@ pub fn render(app: &mut App, f: &mut Frame) {
 
     render_status(app, f, status);
     render_threads(app, f, threads);
-    render_transcript(app, f, transcript);
-    render_compose(app, f, compose);
+    // The composer is the transcript's SUB-WINDOW: it lives INSIDE
+    // the transcript pane (open = the pane splits into the 日 shape:
+    // the log above, the compose below).
+    if app.show_compose {
+        let rows = app.draft.lines().len().clamp(1, 8) as u16;
+        let [t_area, c_area] = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(rows + 3),
+        ])
+        .areas(transcript);
+        render_transcript(app, f, t_area);
+        render_compose(app, f, c_area);
+    } else {
+        render_transcript(app, f, transcript);
+    }
     render_keybar(app, f, keybar);
     if app.show_peers {
         render_peers_popup(app, f);
@@ -128,7 +131,25 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 55] = [
+    let rows: [(bool, &str, &str); 53] = [
+        (false, "global", ""),
+        (
+            true,
+            "<ctrl+hjkl>",
+            "navigate from anywhere: h = threads · j = next · k = previous · l = transcript",
+        ),
+        (
+            true,
+            "h/j/k/l",
+            "the same directions — except where the focused content uses the key (the lists scroll, the composer types)",
+        ),
+        (
+            true,
+            "Tab",
+            "next pane (threads \u{2192} transcript \u{2192} compose)",
+        ),
+        (true, "L", "core log popup (the core's stderr ring)"),
+        (true, "q", "quit"),
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -153,19 +174,19 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "i",
             "summon the composer (transcript only; typing mode)",
         ),
-        (true, "Ctrl-Enter", "send the compose text"),
-        (true, "Alt-Enter", "send the compose text (either works)"),
-        (true, "Ctrl-W", "drop the word before the caret"),
+        (true, "<ctrl+enter>", "send the compose text"),
+        (true, "<alt+enter>", "send the compose text (either works)"),
+        (true, "<ctrl+w>", "drop the word before the caret"),
         (
             true,
             "Home / End",
-            "line start / end (Ctrl+ = the whole draft)",
+            "line start / end (<ctrl+home>/<ctrl+end> = the whole draft)",
         ),
-        (true, "Ctrl-U", "clear the compose text"),
-        (true, "Ctrl-C", "copy the compose text to the clipboard"),
-        (true, "Ctrl-V", "paste the clipboard at the caret"),
-        (true, "Ctrl-R", "load the compose text from a file"),
-        (true, "Ctrl-S", "save the compose text to a file"),
+        (true, "<ctrl+u>", "clear the compose text"),
+        (true, "<ctrl+c>", "copy the compose text to the clipboard"),
+        (true, "<ctrl+v>", "paste the clipboard at the caret"),
+        (true, "<ctrl+r>", "load the compose text from a file"),
+        (true, "<ctrl+s>", "save the compose text to a file"),
         (true, "Esc", "typing → moving; again = hide the composer"),
         (
             true,
@@ -188,8 +209,8 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         ),
         (true, "s", "save the selected card to a file"),
         (true, "a", "add the counterpart's card (mailboxes tab)"),
-        (true, "Ctrl-V", "paste the card from the clipboard"),
-        (true, "Ctrl-R", "load the card from a file"),
+        (true, "<ctrl+v>", "paste the card from the clipboard"),
+        (true, "<ctrl+r>", "load the card from a file"),
         (true, "j / k \u{2191}\u{2193}", "move the selection"),
         (true, "Esc", "back a level / close the popup"),
         (false, "authors", ""),
@@ -205,34 +226,6 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         ),
         (true, "r", "set the selected identity's remark"),
         (true, "R", "clear the selected identity's remark"),
-        (false, "global", ""),
-        (
-            true,
-            "Ctrl-h/j/k/l",
-            "navigate from anywhere: h/left = threads · j/down = next · k/up = previous · l/right = transcript",
-        ),
-        (
-            true,
-            "Ctrl-arrows",
-            "the same navigation as Ctrl-hjkl",
-        ),
-        (
-            true,
-            "h/j/k/l",
-            "the same directions — except where the focused content uses the key (the lists scroll, the composer types)",
-        ),
-        (
-            true,
-            "arrow keys",
-            "like hjkl: the lists move, the moving-mode composer navigates (typing moves the caret)",
-        ),
-        (
-            true,
-            "Tab",
-            "next pane (threads \u{2192} transcript \u{2192} compose)",
-        ),
-        (true, "L", "core log popup (the core's stderr ring)"),
-        (true, "q", "quit"),
         (false, "log", ""),
         (
             true,
@@ -841,20 +834,36 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     let hints = match (app.focus, app.compose_mode) {
         (Pane::Threads, _) => {
-            "Ctrl-h/j/k/l navigate \u{00b7} t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
+            "<ctrl+hjkl> navigate \u{00b7} t refresh \u{00b7} n new thread \u{00b7} Enter open \u{00b7} j/k move \u{00b7} l right \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
         }
         (Pane::Transcript, _) => {
-            "Ctrl-h/j/k/l navigate \u{00b7} j/k scroll \u{00b7} PgUp/PgDn page \u{00b7} n new thread \u{00b7} i compose \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
+            "<ctrl+hjkl> navigate \u{00b7} j/k scroll \u{00b7} PgUp/PgDn page \u{00b7} n new thread \u{00b7} i compose \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} p profile \u{00b7} L log \u{00b7} ? help \u{00b7} q quit"
         }
         // Typing mode: the editor face.
         (Pane::Compose, ComposeMode::Input) => {
-            "Ctrl/Alt-Enter send \u{00b7} Ctrl-W drop word \u{00b7} Ctrl-U clear \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc leave"
+            "<ctrl+enter>/<alt+enter> send \u{00b7} <ctrl+w> drop word \u{00b7} <ctrl+u> clear \u{00b7} <ctrl+v> paste \u{00b7} <ctrl+c> copy \u{00b7} <ctrl+r>/<ctrl+s> file \u{00b7} Esc leave"
         }
         // Moving mode: plain hjkl navigates (the content layer is
         // free here); i returns to typing; Esc hides the composer.
         (Pane::Compose, ComposeMode::Nav) => "hjkl navigate \u{00b7} i type \u{00b7} Esc hide",
     };
-    Paragraph::new(Span::from(hints).dark_gray())
+    // Three visible levels: the KEYS stand out (yellow), the
+    // descriptions read at plain gray, and the middle-dot
+    // separators recede (dark gray — deliberately harder to see).
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, seg) in hints.split(" \u{00b7} ").enumerate() {
+        if i > 0 {
+            spans.push(Span::from(" \u{00b7} ").dark_gray());
+        }
+        match seg.split_once(' ') {
+            Some((k, d)) => {
+                spans.push(Span::from(k.to_owned()).yellow());
+                spans.push(Span::from(format!(" {d}")).gray());
+            }
+            None => spans.push(Span::from(seg.to_owned()).gray()),
+        }
+    }
+    Paragraph::new(Line::from(spans))
         .centered()
         .render(area, f.buffer_mut());
     // The lazygit touch: the version lives in the bottom-right corner

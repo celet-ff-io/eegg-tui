@@ -614,9 +614,7 @@ impl App {
                 self.focus = Pane::Transcript;
                 self.compose_mode = ComposeMode::Input;
             }
-            (ComposeMode::Nav, KeyCode::Char('h') | KeyCode::Left) => {
-                self.nav_to(Pane::Threads)
-            }
+            (ComposeMode::Nav, KeyCode::Char('h') | KeyCode::Left) => self.nav_to(Pane::Threads),
             (ComposeMode::Nav, KeyCode::Char('l') | KeyCode::Right) => {
                 self.nav_to(Pane::Transcript)
             }
@@ -1144,9 +1142,7 @@ impl App {
             KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus(),
             KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus_back(),
             // The arrow keys mirror hjkl on the structural layer too.
-            KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => {
-                self.nav_to(Pane::Threads)
-            }
+            KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => self.nav_to(Pane::Threads),
             KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => {
                 self.nav_to(Pane::Transcript)
             }
@@ -1194,7 +1190,10 @@ impl App {
             KeyCode::Char('n') => {
                 self.new_thread_intent = true;
                 self.show_compose = true;
-                self.focus = Pane::Compose;
+                // Through nav_to: landing on the composer ALWAYS
+                // returns it to the typing mode (a stuck moving face
+                // must never survive a summon).
+                self.nav_to(Pane::Compose);
                 self.flash = Some("new thread".into());
             }
             // Summon the composer (leaving it was Esc — symmetric
@@ -1203,7 +1202,7 @@ impl App {
             // so the summon is transcript-only.
             KeyCode::Char('i') if self.focus == Pane::Transcript => {
                 self.show_compose = true;
-                self.focus = Pane::Compose;
+                self.nav_to(Pane::Compose);
             }
             // The core's stderr ring — the diagnosis window (a talky
             // core: --core "zconned -v").

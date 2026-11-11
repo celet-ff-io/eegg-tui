@@ -252,7 +252,7 @@ impl App {
             transcript_sel: ListState::default(),
             open_thread: None,
             draft: Draft::new(),
-            show_compose: true,
+            show_compose: false,
             cursor: Vec::new(),
             new_thread_intent: false,
             staged: None,

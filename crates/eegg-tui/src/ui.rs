@@ -126,7 +126,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 49] = [
+    let rows: [(bool, &str, &str); 48] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -148,7 +148,6 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "i", "summon the composer (typing starts immediately)"),
         (true, "Ctrl-Enter", "send the compose text"),
         (true, "Alt-Enter", "send the compose text (either works)"),
-        (true, "Enter", "newline (the compose text is multi-line)"),
         (true, "Ctrl-U", "clear the compose text"),
         (true, "Ctrl-C", "copy the compose text to the clipboard"),
         (true, "Ctrl-V", "paste the clipboard at the caret"),
@@ -793,7 +792,7 @@ fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
             "j/k scroll \u{00b7} n new thread \u{00b7} i compose \u{00b7} r staged \u{00b7} y copy \u{00b7} w save row \u{00b7} h left \u{00b7} p profile \u{00b7} L log \u{00b7} Tab next \u{00b7} ? help \u{00b7} q quit"
         }
         Pane::Compose => {
-            "Ctrl/Alt-Enter send \u{00b7} Enter newline \u{00b7} Ctrl-U clear \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc leave"
+            "Ctrl/Alt-Enter send \u{00b7} Ctrl-U clear \u{00b7} Ctrl-V paste \u{00b7} Ctrl-C copy \u{00b7} Ctrl-R/S file \u{00b7} Esc leave"
         }
     };
     Paragraph::new(Span::from(hints).dark_gray())

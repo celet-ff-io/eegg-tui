@@ -17,7 +17,9 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use crate::app::{App, CardFlow, ComposeMode, Pane, ProfileTab, anchor_of, preview_bytes, short_hex};
+use crate::app::{
+    App, CardFlow, ComposeMode, Pane, ProfileTab, anchor_of, preview_bytes, short_hex,
+};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -126,7 +128,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 54] = [
+    let rows: [(bool, &str, &str); 55] = [
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),
@@ -146,18 +148,30 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "y", "copy the selected row's text to the clipboard"),
         (true, "w", "save the selected row's text to a file"),
         (false, "compose", ""),
-        (true, "i", "summon the composer (transcript only; typing mode)"),
+        (
+            true,
+            "i",
+            "summon the composer (transcript only; typing mode)",
+        ),
         (true, "Ctrl-Enter", "send the compose text"),
         (true, "Alt-Enter", "send the compose text (either works)"),
         (true, "Ctrl-W", "drop the word before the caret"),
-        (true, "Home / End", "line start / end (Ctrl+ = the whole draft)"),
+        (
+            true,
+            "Home / End",
+            "line start / end (Ctrl+ = the whole draft)",
+        ),
         (true, "Ctrl-U", "clear the compose text"),
         (true, "Ctrl-C", "copy the compose text to the clipboard"),
         (true, "Ctrl-V", "paste the clipboard at the caret"),
         (true, "Ctrl-R", "load the compose text from a file"),
         (true, "Ctrl-S", "save the compose text to a file"),
         (true, "Esc", "typing → moving; again = hide the composer"),
-        (true, "hjkl (moving)", "navigate while the composer is in the moving mode"),
+        (
+            true,
+            "hjkl (moving)",
+            "navigate while the composer is in the moving mode",
+        ),
         (true, "i (moving)", "back to typing"),
         (false, "profile", ""),
         (true, "p", "open the profile popup"),
@@ -195,15 +209,28 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (
             true,
             "Ctrl-h/j/k/l",
-            "navigate from anywhere (plain hjkl belongs to the focused content)",
+            "navigate from anywhere: h/left = threads · j/down = next · k/up = previous · l/right = transcript",
+        ),
+        (
+            true,
+            "Ctrl-arrows",
+            "the same navigation as Ctrl-hjkl",
+        ),
+        (
+            true,
+            "h/j/k/l",
+            "the same directions — except where the focused content uses the key (the lists scroll, the composer types)",
+        ),
+        (
+            true,
+            "arrow keys",
+            "like hjkl: the lists move, the moving-mode composer navigates (typing moves the caret)",
         ),
         (
             true,
             "Tab",
             "next pane (threads \u{2192} transcript \u{2192} compose)",
         ),
-        (true, "h", "the threads pane (left)"),
-        (true, "l", "the transcript pane (right)"),
         (true, "L", "core log popup (the core's stderr ring)"),
         (true, "q", "quit"),
         (false, "log", ""),
@@ -794,12 +821,7 @@ fn render_compose(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         } else {
             app.draft.cursor().0.saturating_sub(rows as usize - 1)
         };
-        for (i, line) in lines
-            .iter()
-            .skip(top)
-            .take(rows as usize)
-            .enumerate()
-        {
+        for (i, line) in lines.iter().skip(top).take(rows as usize).enumerate() {
             let visible: String = line.chars().take(width).collect();
             let span = Span::from(visible);
             Line::from(if dim { span.dark_gray() } else { span }).render(
@@ -830,9 +852,7 @@ fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
         }
         // Moving mode: plain hjkl navigates (the content layer is
         // free here); i returns to typing; Esc hides the composer.
-        (Pane::Compose, ComposeMode::Nav) => {
-            "hjkl navigate \u{00b7} i type \u{00b7} Esc hide"
-        }
+        (Pane::Compose, ComposeMode::Nav) => "hjkl navigate \u{00b7} i type \u{00b7} Esc hide",
     };
     Paragraph::new(Span::from(hints).dark_gray())
         .centered()

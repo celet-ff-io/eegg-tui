@@ -597,10 +597,10 @@ impl App {
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
             match key.code {
-                KeyCode::Char('h') => self.nav_to(Pane::Threads),
-                KeyCode::Char('l') => self.nav_to(Pane::Transcript),
-                KeyCode::Char('j') => self.cycle_focus(),
-                KeyCode::Char('k') => self.cycle_focus_back(),
+                KeyCode::Char('h') | KeyCode::Left => self.nav_to(Pane::Threads),
+                KeyCode::Char('l') | KeyCode::Right => self.nav_to(Pane::Transcript),
+                KeyCode::Char('j') | KeyCode::Down => self.cycle_focus(),
+                KeyCode::Char('k') | KeyCode::Up => self.cycle_focus_back(),
                 _ => return,
             }
             return;
@@ -614,10 +614,14 @@ impl App {
                 self.focus = Pane::Transcript;
                 self.compose_mode = ComposeMode::Input;
             }
-            (ComposeMode::Nav, KeyCode::Char('h')) => self.nav_to(Pane::Threads),
-            (ComposeMode::Nav, KeyCode::Char('l')) => self.nav_to(Pane::Transcript),
-            (ComposeMode::Nav, KeyCode::Char('j')) => self.cycle_focus(),
-            (ComposeMode::Nav, KeyCode::Char('k')) => self.cycle_focus_back(),
+            (ComposeMode::Nav, KeyCode::Char('h') | KeyCode::Left) => {
+                self.nav_to(Pane::Threads)
+            }
+            (ComposeMode::Nav, KeyCode::Char('l') | KeyCode::Right) => {
+                self.nav_to(Pane::Transcript)
+            }
+            (ComposeMode::Nav, KeyCode::Char('j') | KeyCode::Down) => self.cycle_focus(),
+            (ComposeMode::Nav, KeyCode::Char('k') | KeyCode::Up) => self.cycle_focus_back(),
             (ComposeMode::Nav, KeyCode::Char('i')) => self.compose_mode = ComposeMode::Input,
             (ComposeMode::Nav, _) => {}
             // The typing mode: the editor face. Enter is a newline;
@@ -1138,9 +1142,16 @@ impl App {
                 self.nav_to(Pane::Transcript)
             }
             KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus(),
-            KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => {
-                self.cycle_focus_back()
+            KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus_back(),
+            // The arrow keys mirror hjkl on the structural layer too.
+            KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => {
+                self.nav_to(Pane::Threads)
             }
+            KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => {
+                self.nav_to(Pane::Transcript)
+            }
+            KeyCode::Up if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus_back(),
+            KeyCode::Down if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus(),
             // The transcript pages by the last rendered viewport.
             KeyCode::PageUp if self.focus == Pane::Transcript => self.page_sel(-1),
             KeyCode::PageDown if self.focus == Pane::Transcript => self.page_sel(1),

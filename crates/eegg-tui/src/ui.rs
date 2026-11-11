@@ -890,7 +890,12 @@ fn keybar_lines(hints: &str, x: u16, a: u16) -> Vec<Vec<Span<'static>>> {
         let spans = hint_spans(seg);
         let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
         let sep_w = if used == 0 { 0 } else { 3 }; // " \u{00b7} "
-        let mut overflow = used + sep_w + w > x.saturating_sub(a);
+        // The limit follows the line's state: reserved lines budget
+        // for the extra info (x-a), decided lines fill to the full
+        // width (x). The decision fires ONCE per line — afterwards
+        // every segment is measured against x alone.
+        let limit = if reserved { x.saturating_sub(a) } else { x };
+        let mut overflow = used + sep_w + w > limit;
         if overflow && reserved {
             // The wrap decision: the extra info leaves this line;
             // the line now fills to the full width - retry against
@@ -917,7 +922,10 @@ fn keybar_lines(hints: &str, x: u16, a: u16) -> Vec<Vec<Span<'static>>> {
         let sep_w = if used == 0 { 0 } else { 3 };
         bounds.push(line.len());
         if used > 0 {
-            line.push(Span::styled(" \u{00b7} ".to_owned(), Style::new().dark_gray()));
+            line.push(Span::styled(
+                " \u{00b7} ".to_owned(),
+                Style::new().dark_gray(),
+            ));
         }
         line.extend(spans);
         used += sep_w + w;
@@ -1006,3 +1014,4 @@ mod tests {
         assert!(line_width(&lines[1]) + 6 <= 20);
     }
 }
+

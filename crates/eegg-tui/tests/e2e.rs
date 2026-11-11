@@ -213,9 +213,11 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     a.wait_for(
         "the commit receipt package with the self roster (a)",
         Duration::from_secs(10),
-        |f| matches!(f, Out::MsgPackagePush(p)
+        |f| {
+            matches!(f, Out::MsgPackagePush(p)
             if p.package.as_ref().and_then(|pkg| pkg.local.as_ref())
-                .is_some_and(|l| l.signer.iter().any(|s| s.anchor == a_anchor))),
+                .is_some_and(|l| l.signer.iter().any(|s| s.anchor == a_anchor)))
+        },
     );
     println!("e2e: commit receipt (package) with the self roster received on a");
 
@@ -226,9 +228,11 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     let pkg = b.wait_for(
         "the arrival package with a's anchor on b",
         Duration::from_secs(30),
-        |f| matches!(f, Out::MsgPackagePush(p)
+        |f| {
+            matches!(f, Out::MsgPackagePush(p)
             if p.package.as_ref().and_then(|pkg| pkg.local.as_ref())
-                .is_some_and(|l| l.signer.iter().any(|s| s.anchor == a_anchor))),
+                .is_some_and(|l| l.signer.iter().any(|s| s.anchor == a_anchor)))
+        },
     );
     println!("e2e: arrival landed on b (roster states a's anchor)");
     let thread_ref = match pkg {
@@ -272,9 +276,9 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     ));
     b.wait_for("the remark receipt (b)", Duration::from_secs(10), |f| {
         matches!(f, Out::IdentitiesPush(p)
-            if p.identities.iter().any(|i| {
-                i.anchor == a_anchor && i.remark.as_deref() == Some("the counterpart")
-            }))
+        if p.identities.iter().any(|i| {
+            i.anchor == a_anchor && i.remark.as_deref() == Some("the counterpart")
+        }))
     });
     println!("e2e: remark set; the registry receipt states it");
 
@@ -285,17 +289,23 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     });
     println!("e2e: identities_get answers the derived anchor set");
 
-    b.send(Method::MsgThreadsLogGet(zconned_stdio_types::MsgThreadsLogGet {
-        thread: Some(thread_ref),
-    }));
-    b.wait_for("the log re-fetch with the remark", Duration::from_secs(10), |f| {
-        matches!(f, Out::MsgThreadsLogPush(p)
+    b.send(Method::MsgThreadsLogGet(
+        zconned_stdio_types::MsgThreadsLogGet {
+            thread: Some(thread_ref),
+        },
+    ));
+    b.wait_for(
+        "the log re-fetch with the remark",
+        Duration::from_secs(10),
+        |f| {
+            matches!(f, Out::MsgThreadsLogPush(p)
             if p.packages.iter().any(|pkg| {
                 pkg.local.as_ref().is_some_and(|l| {
                     l.remark.as_deref() == Some("the counterpart")
                 })
             }))
-    });
+        },
+    );
     println!("e2e: the log re-fetch carries the fresh remark");
 
     b.send(Method::IdentityRemarkSet(
@@ -304,9 +314,11 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
             remark: String::new(),
         },
     ));
-    b.wait_for("remark_required", Duration::from_secs(10), |f| {
-        matches!(f, Out::Error(e) if e.code == "remark_required")
-    });
+    b.wait_for(
+        "remark_required",
+        Duration::from_secs(10),
+        |f| matches!(f, Out::Error(e) if e.code == "remark_required"),
+    );
     println!("e2e: an empty remark answers remark_required");
 
     b.send(Method::IdentityRemarkSet(
@@ -315,9 +327,11 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
             remark: "nobody".into(),
         },
     ));
-    b.wait_for("unknown_author", Duration::from_secs(10), |f| {
-        matches!(f, Out::Error(e) if e.code == "unknown_author")
-    });
+    b.wait_for(
+        "unknown_author",
+        Duration::from_secs(10),
+        |f| matches!(f, Out::Error(e) if e.code == "unknown_author"),
+    );
     println!("e2e: an unobserved anchor answers unknown_author");
 
     // Teardown: EOF each core (the standing relay session dies with

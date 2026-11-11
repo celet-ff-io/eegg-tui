@@ -11,7 +11,7 @@ use ratatui::{
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style, Stylize as _},
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
@@ -762,5 +762,10 @@ fn render_keybar(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
     };
     Paragraph::new(Span::from(hints).dark_gray())
         .centered()
+        .render(area, f.buffer_mut());
+    // The lazygit touch: the version lives in the bottom-right corner
+    // (compile-time — the crate version, the single version carrier).
+    Paragraph::new(Span::from(format!("v{}", env!("CARGO_PKG_VERSION"))).dark_gray())
+        .alignment(Alignment::Right)
         .render(area, f.buffer_mut());
 }

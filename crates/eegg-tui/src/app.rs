@@ -1078,8 +1078,10 @@ impl App {
                 self.flash = Some("new thread".into());
             }
             // Summon the composer (leaving it was Esc — symmetric
-            // entry; typing starts immediately).
-            KeyCode::Char('i') => {
+            // entry; typing starts immediately). The composer is the
+            // transcript's sub-window: other panes have no compose,
+            // so the summon is transcript-only.
+            KeyCode::Char('i') if self.focus == Pane::Transcript => {
                 self.show_compose = true;
                 self.focus = Pane::Compose;
             }

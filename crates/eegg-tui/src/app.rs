@@ -77,6 +77,16 @@ impl ContentKind {
             ContentKind::Mailboxes,
         ][n]
     }
+
+    /// The position in the mode order (1..4).
+    pub fn index(self) -> usize {
+        match self {
+            ContentKind::Threads => 0,
+            ContentKind::Transcript => 1,
+            ContentKind::Authors => 2,
+            ContentKind::Mailboxes => 3,
+        }
+    }
 }
 
 /// One region: which content it shows, plus that content's VIEW
@@ -136,9 +146,12 @@ pub struct App {
     /// The composer renders inside its HOST region's transcript —
     /// fixed at summon time.
     pub compose_host: usize,
-    /// The mode: the in-place content menu over the focused region
-    /// (a modal — it eats every key until closed).
+    /// The mode: entering it turns the WHOLE window into the
+    /// selection surface (not a small popup) — a modal that eats
+    /// every key until closed. `mode_sel` is the highlighted
+    /// entry (j/k move it, Enter opens it, 1-4 jump direct).
     pub mode_menu: bool,
+    pub mode_sel: usize,
     pub threads: Vec<MsgRef>,
     pub entries: Vec<Entry>,
     /// The thread whose log the transcript currently shows (the reply
@@ -314,6 +327,7 @@ impl App {
             ],
             compose_host: 1,
             mode_menu: false,
+            mode_sel: 0,
             threads: Vec::new(),
             entries: Vec::new(),
             open_thread: None,
@@ -1077,8 +1091,9 @@ impl App {
             return;
         }
 
-        // The mode: a modal over the focused region — 1..4 picks
-        // the content, Esc/m closes without change, the rest is
+        // The mode: the WHOLE window is the selection surface —
+        // j/k move the highlight, Enter opens it, 1..4 jump
+        // direct, Esc/m closes without change, the rest is
         // ignored (q is NOT bound: q means quit, everywhere).
         if self.mode_menu {
             match key.code {
@@ -1086,6 +1101,12 @@ impl App {
                     let n = c.to_digit(10).expect("checked") as usize - 1;
                     self.mode_menu = false;
                     self.set_region_content(self.focus_region(), ContentKind::nth(n));
+                }
+                KeyCode::Char('j') | KeyCode::Down => self.mode_sel = (self.mode_sel + 1).min(3),
+                KeyCode::Char('k') | KeyCode::Up => self.mode_sel = self.mode_sel.saturating_sub(1),
+                KeyCode::Enter => {
+                    self.mode_menu = false;
+                    self.set_region_content(self.focus_region(), ContentKind::nth(self.mode_sel));
                 }
                 KeyCode::Esc | KeyCode::Char('m') => self.mode_menu = false,
                 _ => {}
@@ -1148,10 +1169,14 @@ impl App {
             // The numbered regions: the direct jump (no cycling).
             KeyCode::Char('1') => self.nav_to_region(0),
             KeyCode::Char('2') => self.nav_to_region(1),
-            // The mode: the in-place content menu over this
-            // region. `o` stays free for the transcript's future
+            // The mode: the whole-window content picker over
+            // this region, the cursor starting on the current
+            // content. `o` stays free for the transcript's future
             // open-file key (the multimedia era).
-            KeyCode::Char('m') => self.mode_menu = true,
+            KeyCode::Char('m') => {
+                self.mode_menu = true;
+                self.mode_sel = self.regions[self.focus_region()].content.index();
+            }
             // The mailboxes, right here: focus stays, the content
             // swaps.
             KeyCode::Char('p') => {
@@ -1711,12 +1736,29 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_number_selects_and_closes() {
+    fn the_mode_moves_and_opens() {
         let mut app = App::new();
         app.mode_menu = true;
-        // Route a '3' through the key handler: authors, and closed.
-        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+        app.mode_sel = app.regions[0].content.index();
+        // Route keys through the handler: j moves the cursor,
+        // Enter opens the highlighted kind.
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('j'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(app.mode_sel, 1);
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!app.mode_menu);
+        assert_eq!(app.regions[0].content, ContentKind::Transcript);
+
+        // Re-open: a number key still jumps direct.
+        app.mode_menu = true;
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('3'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
         ));
         assert!(!app.mode_menu);
         assert_eq!(app.regions[0].content, ContentKind::Authors);

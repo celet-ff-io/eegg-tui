@@ -60,12 +60,8 @@ pub fn render(app: &mut App, f: &mut Frame) {
     render_region(app, f, 1, r1);
     render_keybar(f, keybar, &hint_lines, &version);
     if app.mode_menu {
-        let focused = match app.focus {
-            Focus::Region(i) => i.min(app.regions.len() - 1),
-            Focus::Compose => app.compose_host.min(app.regions.len() - 1),
-        };
-        let area = if focused == 0 { r0 } else { r1 };
-        render_mode_menu(app, f, area);
+        render_mode_menu(app, f);
+        return;
     }
     if app.show_log {
         render_log_popup(app, f);
@@ -108,31 +104,47 @@ fn rule(width: usize, label: &str) -> Span<'static> {
     Span::from(format!("{:-^width$}", label)).dark_gray()
 }
 
-/// The mode: the in-place content menu, drawn over the focused
-/// region's own area (the rest of the screen stays visible). The
-/// current content is marked — selecting it just closes.
-fn render_mode_menu(app: &App, f: &mut Frame, region_area: ratatui::prelude::Rect) {
-    let current = app.regions[match app.focus {
+/// The mode: entering it turns the WHOLE window into the
+/// selection surface (the principal — not a small popup over the
+/// focused region). j/k move the highlight, Enter opens it,
+/// 1-4 jump direct; the current content is marked — selecting
+/// it just closes.
+fn render_mode_menu(app: &App, f: &mut Frame) {
+    let focused = match app.focus {
         Focus::Region(i) => i.min(app.regions.len() - 1),
         Focus::Compose => app.compose_host.min(app.regions.len() - 1),
-    }]
-    .content;
-    let lines: Vec<Line> = (0..4)
-        .map(|n| {
-            let kind = ContentKind::nth(n);
-            let mark = if kind == current { "\u{25cf} " } else { "  " };
-            Line::from(vec![
-                Span::from(format!(" {mark}{}", n + 1)).yellow().bold(),
-                Span::from(format!(" {}", kind.title())).cyan(),
-            ])
-        })
-        .collect();
-    let area = centered(region_area, 40, 8);
+    };
+    let current = app.regions[focused].content;
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for n in 0..4 {
+        let kind = ContentKind::nth(n);
+        let sel = app.mode_sel == n;
+        let mark = if sel { "\u{25b6} " } else { "  " };
+        let cur = if kind == current {
+            "  \u{25cf} current"
+        } else {
+            ""
+        };
+        let num = Span::from(format!(" {mark}{}", n + 1));
+        let num = if sel {
+            num.yellow().bold()
+        } else {
+            num.dark_gray()
+        };
+        let title = Span::from(format!(" {}{cur}", kind.title()));
+        let title = if sel { title.bold() } else { title.cyan() };
+        lines.push(Line::from(vec![num, title]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        Span::from("  j/k select · Enter open · 1-4 direct · Esc/m close").dark_gray(),
+    ));
+    let area = f.area();
     f.render_widget(Clear, area);
     Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(" mode \u{00b7} 1-4 content \u{00b7} Esc/m close ")
+                .title(format!(" mode \u{2014} region {}'s content ", focused + 1))
                 .border_style(Color::Magenta),
         )
         .render(area, f.buffer_mut());
@@ -183,7 +195,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 54] = [
+    let rows: [(bool, &str, &str); 55] = [
         (false, "global", ""),
         (
             true,
@@ -203,8 +215,13 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (false, "mode", ""),
         (
             true,
+            "m",
+            "the WHOLE window becomes the picker (j/k select, Enter open)",
+        ),
+        (
+            true,
             "1..4",
-            "switch this region's content (the current closes)",
+            "jump direct to a content (the current closes)",
         ),
         (true, "Esc/m", "close, no change"),
         (false, "threads", ""),
@@ -898,7 +915,7 @@ fn render_compose_body(
 fn keybar_hints(app: &App) -> &'static str {
     // The mode is a modal: its own one-line hint.
     if app.mode_menu {
-        return "1..4 content · Esc/m close";
+        return "j/k select · Enter open · 1-4 direct · Esc/m close";
     }
     // Typing: the editor face. (Standby shows the focused content's
     // face below — standby IS the default state.)

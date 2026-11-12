@@ -40,8 +40,9 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub log_file: Option<std::path::PathBuf>,
 
-    /// Print the third-party license bundle to stdout and exit. The
-    /// TUI carries no license mode — the terminal prints text.
+    /// Print the third-party license page (HTML) to stdout and exit.
+    /// Redirect it to a file and open it in a browser, e.g.
+    /// `eegg --license > license.html`.
     #[arg(long)]
     pub license: bool,
 

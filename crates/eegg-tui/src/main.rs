@@ -3,7 +3,7 @@
 
 use clap::Parser as _;
 
-use eegg_tui::{cli::Cli, license::THIRD_PARTY_LICENSES, run};
+use eegg_tui::{cli::Cli, license::LICENSE_HTML, run};
 
 fn main() -> miette::Result<()> {
     let cli = Cli::parse();
@@ -13,7 +13,7 @@ fn main() -> miette::Result<()> {
         use std::io::Write as _;
         let mut out = std::io::stdout().lock();
         let done = out
-            .write_all(THIRD_PARTY_LICENSES.as_bytes())
+            .write_all(LICENSE_HTML.as_bytes())
             .and_then(|()| out.flush());
         // A reader exiting early (`| head`) closes the pipe: die
         // quietly with the shell convention, not a panic report.

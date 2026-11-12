@@ -7,15 +7,17 @@ core down.
 ## Licensing
 
 eegg is `MIT OR Apache-2.0` (see `LICENSE-MIT` / `LICENSE-APACHE`);
-`eegg --license` prints the third-party license bundle to stdout.
-
-The bundle (`third-party-licenses.txt`, committed) is rendered by
-`cargo about` from the template `about.txt.hbs` over the dependency
-graph — regenerate it whenever the dependency set changes:
+`eegg --license` prints the third-party license page to stdout —
+redirect it to a file and open it in a browser:
 
 ```
-cargo about generate about.txt.hbs -o third-party-licenses.txt
+eegg --license > license.html
 ```
 
-`about.hbs` is the HTML variant of the same tooling (not embedded;
-kept for the web-facing sibling that shares the templates).
+The committed page (`license.html`) is rendered by `cargo about`
+from the template `about.hbs` over the dependency graph — regenerate
+it whenever the dependency set changes:
+
+```
+cargo about generate about.hbs -o license.html
+```

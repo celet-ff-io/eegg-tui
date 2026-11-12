@@ -160,6 +160,11 @@ pub struct App {
     /// Enter opens it, 1-4 jump direct).
     pub mode_menu: bool,
     pub mode_sel: usize,
+    /// The fingerprint popup: Some(full form) while shown — a
+    /// frozen snapshot of the selected identity's anchor at open
+    /// time (the popup eats every key, so the selection cannot
+    /// drift under it). Esc/m/q close; c copies the full form.
+    pub fp_shown: Option<String>,
     /// The temp window: at most one (ruling 9). A modal overlay —
     /// the popups stack over it, Esc pops it back to the origin
     /// region. `temp_fresh` = the picker is its first face (no
@@ -343,6 +348,7 @@ impl App {
             compose_host: 1,
             mode_menu: false,
             mode_sel: 0,
+            fp_shown: None,
             temp: None,
             temp_origin: 0,
             temp_fresh: false,
@@ -488,6 +494,35 @@ impl App {
         } else {
             Focus::Region(i)
         };
+    }
+
+    /// f: show the selected identity's FULL fingerprint (the F1
+    /// full notation — the human cross-check channel). The mailboxes
+    /// self row has no roster anchor (the core holds that key): the
+    /// card channels (c/s) are the verification path there.
+    fn open_fp_popup(&mut self) {
+        let anchor = match self.viewport(self.focus_region()).content {
+            ContentKind::Authors => self.selected_author(),
+            ContentKind::Mailboxes => {
+                match self.viewport(self.focus_region()).mailboxes_sel.selected() {
+                    Some(i) if i > 0 => self.peers.get(i - 1).map(anchor_of),
+                    _ => {
+                        self.flash = Some(
+                            "the self row: verify through the card (c/s — the core holds the key)"
+                                .into(),
+                        );
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
+        match anchor {
+            Some(a) if a.len() == zconned_crypto::DIGEST_LEN => {
+                self.fp_shown = Some(fp_full(&a));
+            }
+            _ => self.flash = Some("no identity selected".into()),
+        }
     }
 
     /// Open the temp window (x): a modal overlay whose FIRST face
@@ -1246,6 +1281,27 @@ impl App {
             return;
         }
 
+        // The fingerprint popup: the selected identity's FULL form
+        // (a frozen snapshot). Esc/m/q close (q follows the log
+        // popup's precedent: a stray q quits from the main surface,
+        // never from inside a popup); c copies the full form.
+        if self.fp_shown.is_some() {
+            match key.code {
+                KeyCode::Char('c') => {
+                    let text = self.fp_shown.clone().expect("checked");
+                    self.flash = Some(clipboard::set(&text).map_or_else(
+                        |reason| format!("{reason} — the full form stays on screen"),
+                        |()| "full fingerprint copied".to_owned(),
+                    ));
+                }
+                KeyCode::Esc | KeyCode::Char('m') | KeyCode::Char('q') => {
+                    self.fp_shown = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The temp window: a modal overlay (the profile-popup
         // pattern — the popups above stack over it). No structural
         // navigation out of it: Esc pops it back to the origin
@@ -1412,6 +1468,10 @@ impl App {
             ContentKind::Authors => match key.code {
                 // The remark edit on the selected identity (the
                 // registry is the remark's authority).
+                // The full fingerprint of the selected identity
+                // (the human cross-check channel; c inside the
+                // popup copies it).
+                KeyCode::Char('f') => self.open_fp_popup(),
                 KeyCode::Char('r') => {
                     self.remark_input.reset();
                     self.card_flow = CardFlow::InputRemark;
@@ -1435,6 +1495,8 @@ impl App {
                 _ => {}
             },
             ContentKind::Mailboxes => match key.code {
+                // The selected peer's full fingerprint.
+                KeyCode::Char('f') => self.open_fp_popup(),
                 // Adding a card is a MAILBOX-domain action.
                 KeyCode::Char('a') => {
                     self.peer_input.reset();
@@ -1807,6 +1869,22 @@ pub fn digest_preview(b: &[u8]) -> String {
     b.iter().take(6).map(|x| format!("{x:02x}")).collect()
 }
 
+/// The identity fingerprint's FULL display form (F1's ratified
+/// notation): `sha3-256:<64 lowercase hex>` — the canon `Display`
+/// over an already-computed digest (the pin test ties the two).
+/// The human cross-check channel; verification still goes through
+/// the card text.
+pub fn fp_full(digest: &[u8]) -> String {
+    format!(
+        "{}:{}",
+        zconned_crypto::DIGEST_ALGO,
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
+}
+
 /// The identity fingerprint's SHORT display form (F1 — the
 /// standard fingerprint display notation memo): the digest's
 /// FIRST 8 bytes, lowercase
@@ -2002,6 +2080,31 @@ mod tests {
     }
 
     #[test]
+    fn f_shows_the_full_fingerprint_and_esc_closes() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.focus = Focus::Region(1);
+        app.regions[1].content = ContentKind::Authors;
+        app.authors.insert(
+            vec![9u8; zconned_crypto::DIGEST_LEN],
+            crate::app::AuthorEntry {
+                verified: true,
+                remark: None,
+            },
+        );
+        app.regions[1].authors_sel.select(Some(0));
+        app.on_key(KeyEvent::from(KeyCode::Char('f')));
+        let shown = app.fp_shown.clone().expect("shown");
+        assert!(shown.starts_with("sha3-256:"));
+        assert_eq!(
+            shown.len(),
+            "sha3-256:".len() + 2 * zconned_crypto::DIGEST_LEN
+        );
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.fp_shown.is_none());
+    }
+
+    #[test]
     fn fp_short_is_the_canon_short_form_of_the_same_digest() {
         // F1: the short form is the full form's GROUPED HEAD — the
         // local helper (over an already-computed digest) must equal
@@ -2014,6 +2117,8 @@ mod tests {
         let text = fp.short();
         assert_eq!(text.len(), 4 * 4 + 3);
         assert_eq!(text.matches(' ').count(), 3);
+        // And the FULL form helper matches the canon Display.
+        assert_eq!(fp_full(fp.digest()), fp.to_string());
     }
 
     #[test]

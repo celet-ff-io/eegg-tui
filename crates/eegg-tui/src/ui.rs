@@ -64,6 +64,9 @@ pub fn render(app: &mut App, f: &mut Frame) {
     if app.temp.is_some() {
         render_temp(app, f);
     }
+    if app.fp_shown.is_some() {
+        render_fp_popup(app, f);
+    }
     if app.show_log {
         render_log_popup(app, f);
     }
@@ -119,6 +122,28 @@ fn region_border(app: &App, i: usize) -> Color {
 /// region focus; a colored rule would read as a second frame).
 fn rule(width: usize, label: &str) -> Span<'static> {
     Span::from(format!("{:-^width$}", label)).dark_gray()
+}
+
+/// The fingerprint popup: the selected identity's FULL form (F1's
+/// ratified notation) — the human cross-check channel. c copies,
+/// Esc/m closes.
+fn render_fp_popup(app: &App, f: &mut Frame) {
+    let full = app.fp_shown.clone().expect("checked");
+    let area = centered(f.area(), 80, 7);
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::from(format!("  {full}")).yellow().bold()),
+        Line::from(""),
+        Line::from(hint_spans("c copy · Esc/m close")),
+    ];
+    Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(" fingerprint \u{2014} full form ")
+                .border_style(Color::Magenta),
+        )
+        .render(area, f.buffer_mut());
 }
 
 /// The temp window: a modal overlay in the profile-popup pattern
@@ -246,7 +271,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 54] = [
+    let rows: [(bool, &str, &str); 56] = [
         (false, "global", ""),
         (
             true,
@@ -328,6 +353,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "copy the selected card (a mailbox or a rostered author)",
         ),
         (true, "s", "save the selected card to a file"),
+        (
+            true,
+            "f",
+            "the selected peer's full fingerprint (c copies it)",
+        ),
         (true, "a", "add the counterpart's card"),
         (true, "<Ctrl+V>", "paste the card from the clipboard"),
         (true, "<Ctrl+R>", "load the card from a file"),
@@ -343,6 +373,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             true,
             "",
             "\u{00b7} = observed on an envelope only (unverified)",
+        ),
+        (
+            true,
+            "f",
+            "the selected identity's full fingerprint (c copies it)",
         ),
         (true, "r", "set the selected identity's remark"),
         (true, "R", "clear the selected identity's remark"),
@@ -986,10 +1021,10 @@ fn keybar_hints(app: &App) -> &'static str {
             "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m mode · L log · ? help · q quit"
         }
         ContentKind::Authors => {
-            "r remark · R clear remark · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"
+            "r remark · R clear remark · f full fingerprint · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"
         }
         ContentKind::Mailboxes => {
-            "a add card · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"
+            "f full fingerprint · a add card · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"
         }
     }
 }

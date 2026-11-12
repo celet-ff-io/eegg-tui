@@ -138,10 +138,20 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
         let title = if sel { title.bold() } else { title.cyan() };
         lines.push(Line::from(vec![num, title]));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(
-        Span::from("  j/k select · Enter open · 1-4 direct · Esc/m close").dark_gray(),
-    ));
+    // The back entries: m and Esc read as keys that switch to a
+    // specified mode — <back>, the page the region showed before
+    // the modes list. They sit at the list's bottom and are NOT
+    // selectable (j/k stops at the four kinds).
+    let orange = Color::Indexed(208);
+    for (key, style) in [
+        ("m", Style::new().fg(orange).bold()),
+        ("Esc", Style::new().fg(orange).bold().italic()),
+    ] {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {key:<3}"), style),
+            Span::from("<back>").dark_gray(),
+        ]));
+    }
     Paragraph::new(lines)
         .block(
             Block::bordered()
@@ -916,7 +926,7 @@ fn render_compose_body(
 fn keybar_hints(app: &App) -> &'static str {
     // The mode is a modal: its own one-line hint.
     if app.mode_menu {
-        return "j/k select · Enter open · 1-4 direct · Esc/m close";
+        return "j/k select · Enter open · 1-4 direct";
     }
     // Typing: the editor face. (Standby shows the focused content's
     // face below — standby IS the default state.)

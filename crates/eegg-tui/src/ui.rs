@@ -135,7 +135,10 @@ fn render_fp_popup(app: &App, f: &mut Frame) {
         Line::from(""),
         Line::from(Span::from(format!("  {full}")).yellow().bold()),
         Line::from(""),
-        Line::from(hint_spans("c copy · Esc close · m mode")),
+        // The m convenience (switch to the modes picker) is NOT
+        // hinted here: nobody reads it — the standard path is Esc
+        // to the plain view, then m. The keybar keeps the hint.
+        Line::from(hint_spans("c copy · Esc close")),
     ];
     Paragraph::new(lines)
         .block(
@@ -195,7 +198,7 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
         lines.push(Line::from(vec![num, title]));
     }
     lines.push(Line::from(""));
-    // The back entries: m and Esc switch BACK to the page the
+    // The back entries: m, q and Esc switch BACK to the page the
     // region showed before the modes list (its current content —
     // the <back> the principal hinted). Styled like the plain
     // list rows, the keys right-aligned with the 1-4 numbers,
@@ -212,8 +215,8 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
     };
     let rows = [
         ("m", back, Style::new().dark_gray()),
+        ("q", back, Style::new().dark_gray()),
         ("Esc", back, Style::new().dark_gray().italic()),
-        ("q", "quit", Style::new().dark_gray()),
     ];
     for (key, target, style) in rows {
         lines.push(Line::from(vec![
@@ -306,7 +309,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "1..4",
             "jump direct to a content (the current closes)",
         ),
-        (true, "Esc/m", "back to the pre-modes page (no change)"),
+        (true, "Esc/m/q", "back to the pre-modes page (no change)"),
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),

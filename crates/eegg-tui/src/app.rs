@@ -1402,7 +1402,10 @@ impl App {
                     self.mode_menu = false;
                     self.set_region_content(self.focus_region(), ContentKind::nth(self.mode_sel));
                 }
-                KeyCode::Esc | KeyCode::Char('m') => {
+                // Back: q shares the m/Esc semantics (the row sits
+                // between them in the frame — it is NOT quit here;
+                // the global q-quit stays on the main surfaces).
+                KeyCode::Esc | KeyCode::Char('m') | KeyCode::Char('q') => {
                     if self.focus == Focus::Temp && self.temp_fresh {
                         // The picker is the temp window's first face:
                         // going back means closing the window (no
@@ -1412,7 +1415,6 @@ impl App {
                         self.mode_menu = false;
                     }
                 }
-                KeyCode::Char('q') => self.quit = true,
                 _ => {}
             }
             return;
@@ -2398,10 +2400,15 @@ mod tests {
         assert!(app.mode_menu);
         app.on_key(KeyEvent::from(KeyCode::Esc));
 
-        // Inside the modes picker itself: m means back.
+        // Inside the modes picker itself: m means back — and q
+        // shares it (the row sits between m and Esc; it is NOT
+        // quit there).
         app.mode_menu = true;
         app.on_key(KeyEvent::from(KeyCode::Char('m')));
         assert!(!app.mode_menu);
+        app.mode_menu = true;
+        app.on_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.mode_menu && !app.quit);
     }
 
     #[test]

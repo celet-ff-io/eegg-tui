@@ -20,11 +20,11 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use zconned_material::CLAIM_KIND_TS;
 use crate::app::{
     App, CardFlow, ContentKind, Focus, anchor_of, digest_preview, fp_short, full_text,
     preview_bytes, wrap_width,
 };
+use zconned_material::CLAIM_KIND_TS;
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -44,8 +44,8 @@ pub fn restore_terminal() {
 /// The render guard: a slot whose quadrant falls below these
 /// floors is NOT rendered (dark) — never closed; it returns when
 /// the terminal grows. The terminal is the ultimate clamp.
-const MIN_SLOT_W: u16 = 20;
-const MIN_SLOT_H: u16 = 4;
+pub(crate) const MIN_SLOT_W: u16 = 20;
+pub(crate) const MIN_SLOT_H: u16 = 4;
 
 /// The lattice slot areas over `base`. A whole-empty ROW or COLUMN
 /// collapses to zero (rendering only — the stored ratios survive);
@@ -118,30 +118,42 @@ pub fn render(app: &mut App, f: &mut Frame) {
     // The window lattice: the regions render THROUGH it. The
     // active windows are the regions vector in reading order; an
     // empty reserved position (or a window below the floor) renders
-    // dark — the position stays visible.
-    let mut next = 0usize;
-    for (p, q) in lattice_rects(
-        main,
-        app.lattice.column,
-        app.lattice.row,
-        app.lattice.active,
-    )
-    .into_iter()
-    .enumerate()
-    {
-        let is_active = app.lattice.active[p];
-        let i = next;
-        if is_active {
-            next += 1;
+    // dark — the position stays visible. The base dims feed the
+    // window ops' too-small guard (the last known geometry).
+    app.last_base = (main.width, main.height);
+    if app.zoom {
+        if let Focus::Region(i) = app.focus {
+            // The zoom lens: the focused slot fills the base; the
+            // frozen lattice comes back when the lens ends.
+            render_region(app, f, i, main);
         }
-        match q {
-            Some(area) if is_active && area.width >= MIN_SLOT_W && area.height >= MIN_SLOT_H => {
-                render_region(app, f, i, area);
+    } else {
+        let mut next = 0usize;
+        for (p, q) in lattice_rects(
+            main,
+            app.lattice.column,
+            app.lattice.row,
+            app.lattice.active,
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let is_active = app.lattice.active[p];
+            let i = next;
+            if is_active {
+                next += 1;
             }
-            // A reserved position, or an active window whose
-            // quadrant cannot meet the floor: honest dark space.
-            Some(area) => render_dark(area, f.buffer_mut()),
-            None => {}
+            match q {
+                Some(area)
+                    if is_active && area.width >= MIN_SLOT_W && area.height >= MIN_SLOT_H =>
+                {
+                    render_region(app, f, i, area);
+                }
+                // A reserved position, or an active window whose
+                // quadrant cannot meet the floor: honest dark space.
+                Some(area) => render_dark(area, f.buffer_mut()),
+                None => {}
+            }
         }
     }
     render_status(app, f, status);
@@ -367,7 +379,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 59] = [
+    let rows: [(bool, &str, &str); 67] = [
         (false, "global", ""),
         (
             true,
@@ -383,6 +395,30 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "m", "open the mode: switch this region's content"),
         (true, "L", "core log popup (the core's stderr ring)"),
         (true, "q", "quit"),
+        (
+            true,
+            "<Ctrl+W>v",
+            "open the window to the right (fresh: the picker is its first face)",
+        ),
+        (true, "<Ctrl+W>s", "open the window below"),
+        (
+            true,
+            "<Ctrl+W>c",
+            "close the focused window (the last one stays)",
+        ),
+        (true, "<Ctrl+W>z", "zoom the focused window (toggle)"),
+        (
+            true,
+            "<Ctrl+W>hjkl",
+            "move window focus (the reserved arms)",
+        ),
+        (true, "<Ctrl+W>m", "the mode over the focused window"),
+        (true, "<Ctrl+W>=", "equalize the splits"),
+        (
+            true,
+            "<Ctrl+W>< > - +",
+            "resize the splits (the focused slot's column/row)",
+        ),
         (false, "mode", ""),
         (
             true,
@@ -1201,6 +1237,12 @@ fn render_compose_body(
 }
 
 fn keybar_hints(app: &App) -> &'static str {
+    // The armed window-op prefix: its own line (the swap
+    // pattern — the bar announces the chord vocabulary while
+    // the prefix waits for its second stroke).
+    if app.prefix_armed {
+        return "<Ctrl+W> v right \u{b7} s below \u{b7} c close \u{b7} z zoom \u{b7} hjkl focus \u{b7} m mode \u{b7} = even \u{b7} < > - + resize \u{b7} Esc cancel";
+    }
     // The mode is a modal: its own one-line hint.
     if app.mode_menu {
         return "j/k select · Enter open · 1-4 direct · j/k won't reach the back entries";
@@ -1415,8 +1457,6 @@ fn render_keybar(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
 
     #[test]
     fn the_default_lattice_lays_the_two_windows_at_the_column_ratio() {

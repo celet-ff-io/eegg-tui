@@ -92,7 +92,7 @@ impl ContentKind {
 /// The temp window's view index: the dispatch table reads it
 /// through `viewport`, so the temp window has full dispatch
 /// parity with a region (ruling 10) without being a region.
-pub(crate) const TEMP_VIEW: usize = 2;
+pub(crate) const TEMP_VIEW: usize = usize::MAX;
 
 /// The window lattice: WHICH of the four lattice slots hold a
 /// window, and the two split ratios. The slots are POSITIONS —
@@ -122,6 +122,25 @@ impl Default for Lattice {
             active: [true, true, false, false],
         }
     }
+}
+
+/// The resize step (the ratio chords move the split by this
+/// fraction of the base). A named constant today; the config door
+/// is declared — a per-user step moves it into the layout config
+/// when a real demand shows up.
+const RESIZE_STEP: f64 = 0.05;
+
+/// The resize/zoom floors of the lattice: the render guard dims
+/// any quadrant below these (ui.rs owns the geometry).
+const RATIO_FLOOR: f64 = 0.05;
+
+/// The chord focus arms' directions (the nvim window moves).
+#[derive(Clone, Copy)]
+enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// One region: which content it shows, plus that content's VIEW
@@ -186,6 +205,20 @@ pub struct App {
     /// is layout METADATA, the regions vector is its reading-order
     /// projection.
     pub lattice: Lattice,
+    /// The window-op prefix: armed by Ctrl+W outside the typing
+    /// layer; the next event completes a chord or cancels.
+    pub prefix_armed: bool,
+    /// The zoom lens: the focused slot fills the base while the
+    /// lattice (set + ratios) stays frozen underneath. Any focus
+    /// move or geometry op ends it.
+    pub zoom: bool,
+    /// The fresh slot: a just-created window whose FIRST face is
+    /// the mode picker — going back then closes the slot (the temp
+    /// window's fresh-until-pick pattern, in-layout).
+    pub fresh_slot: Option<usize>,
+    /// The base area at the last render (the too-small guard for
+    /// the window ops runs against the last known geometry).
+    pub last_base: (u16, u16),
     /// The composer renders inside its HOST region's transcript —
     /// fixed at summon time.
     pub compose_host: usize,
@@ -395,6 +428,10 @@ impl App {
                 Viewport::new(ContentKind::Transcript),
             ],
             lattice: Lattice::default(),
+            prefix_armed: false,
+            zoom: false,
+            fresh_slot: None,
+            last_base: (0, 0),
             compose_host: 1,
             mode_menu: false,
             mode_sel: 0,
@@ -493,6 +530,7 @@ impl App {
     /// The composer is NOT in the cycle — `i`/`n` are its only
     /// entries (its standby face is the default state).
     fn cycle_focus(&mut self) {
+        self.unzoom();
         self.focus = match self.focus {
             Focus::Region(0) => Focus::Region(1),
             _ => Focus::Region(0),
@@ -501,6 +539,7 @@ impl App {
 
     /// The reverse cycle (Ctrl+k): region 2 → region 1 → region 2.
     fn cycle_focus_back(&mut self) {
+        self.unzoom();
         self.focus = match self.focus {
             Focus::Region(0) => Focus::Region(1),
             _ => Focus::Region(0),
@@ -510,7 +549,23 @@ impl App {
     /// Direct structural jumps: to a numbered region (Ctrl+h/l, the
     /// arrows; the composer's moving mode rides the same layer).
     fn nav_to_region(&mut self, region: usize) {
+        self.unzoom();
         self.focus = Focus::Region(region.min(self.regions.len().saturating_sub(1)));
+    }
+
+    /// End the zoom lens (the uniform rule: any focus move or
+    /// geometry op reveals the frozen layout first).
+    fn unzoom(&mut self) {
+        self.zoom = false;
+    }
+
+    /// The focused REGION's index (None = the temp window holds the
+    /// focus — it has no slot; the slot-class window ops refuse).
+    fn region_focus(&self) -> Option<usize> {
+        match self.focus {
+            Focus::Region(i) => Some(i.min(self.regions.len().saturating_sub(1))),
+            Focus::Temp | Focus::Compose => None,
+        }
     }
 
     /// The slot number (1..4) of the window at region index `i` —
@@ -546,6 +601,279 @@ impl App {
             Some(i) => self.nav_to_region(i),
             None => self.flash = Some(format!("window {n} is empty")),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The window-op chord family (Ctrl+W prefix): create/close/zoom/
+    // resize/focus — the nvim window-command vocabulary over the
+    // lattice. The prefix arms in the region- and temp-focused
+    // dispatches; the composer's typing layer keeps Ctrl+W = the
+    // word drop (the nvim layering).
+
+    /// The armed state's next event: a valid second stroke executes
+    /// and disarms; Esc and the prefix again cancel silently;
+    /// anything else cancels with a flash (the nvim-beep analog).
+    fn on_key_chord(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        self.prefix_armed = false; // every path completes or cancels
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Char('w') if key.modifiers == KeyModifiers::CONTROL => {}
+            KeyCode::Char('v') => self.chord_create(false),
+            KeyCode::Char('s') => self.chord_create(true),
+            KeyCode::Char('c') => self.chord_close(),
+            KeyCode::Char('z') => self.chord_zoom(),
+            // The mode over the focused VIEWPORT (the temp included:
+            // the viewport-class op survives the temp's isolation).
+            KeyCode::Char('m') => self.open_mode_menu(),
+            // The nvim-exact focus arms (the reserved class): bare
+            // h/j/k/l and their Ctrl- forms both work.
+            KeyCode::Char('h') => self.chord_focus_dir(Dir::Left),
+            KeyCode::Char('l') => self.chord_focus_dir(Dir::Right),
+            KeyCode::Char('j') => self.chord_focus_dir(Dir::Down),
+            KeyCode::Char('k') => self.chord_focus_dir(Dir::Up),
+            KeyCode::Char('=') => self.chord_equalize(),
+            KeyCode::Char('<') => self.chord_resize_column(false),
+            KeyCode::Char('>') => self.chord_resize_column(true),
+            KeyCode::Char('+') => self.chord_resize_row(true),
+            KeyCode::Char('-') => self.chord_resize_row(false),
+            _ => self.flash = Some("the window op canceled".into()),
+        }
+    }
+
+    /// `Ctrl+W v/s`: activate the focused slot's RIGHT (v) or BELOW
+    /// (s) neighbor; the new slot's first face = the mode picker,
+    /// fresh-until-pick. Refusals: no neighbor there, the neighbor
+    /// already open ("layout full" at 4/4), or the terminal too
+    /// small for the target's floors — the last one SILENT (the
+    /// render rule: an unfittable slot never opens, no flash).
+    fn chord_create(&mut self, below: bool) {
+        self.unzoom();
+        let Some(i) = self.region_focus() else {
+            self.flash = Some("focus a slot first".into());
+            return;
+        };
+        let n = self.slot_number(i);
+        let (row, col) = ((n - 1) / 2, (n - 1) % 2);
+        let (tr, tc) = if below {
+            (row + 1, col)
+        } else {
+            (row, col + 1)
+        };
+        if tr > 1 || tc > 1 {
+            self.flash = Some(
+                if below {
+                    "no window below"
+                } else {
+                    "no window to the right"
+                }
+                .into(),
+            );
+            return;
+        }
+        let t = tr * 2 + tc;
+        if self.lattice.active[t] {
+            self.flash = Some(if self.lattice.active.iter().filter(|a| **a).count() == 4 {
+                "layout full".into()
+            } else {
+                format!("window {} is already open", t + 1)
+            });
+            return;
+        }
+        // The silent too-small guard: probe the target's quadrant
+        // under the would-be active set against the last known
+        // geometry; below the floors the chord does nothing.
+        let mut probe = self.lattice.active;
+        probe[t] = true;
+        let base = ratatui::prelude::Rect::new(0, 0, self.last_base.0, self.last_base.1);
+        let fits = crate::ui::lattice_rects(base, self.lattice.column, self.lattice.row, probe)[t]
+            .is_some_and(|q| q.width >= crate::ui::MIN_SLOT_W && q.height >= crate::ui::MIN_SLOT_H);
+        if !fits {
+            return;
+        }
+        // Activate: the regions vector gains the window at its
+        // reading-order position; the picker is its first face.
+        self.lattice.active[t] = true;
+        let at = self.lattice.active[..t].iter().filter(|a| **a).count();
+        self.regions.insert(at, Viewport::new(ContentKind::Threads));
+        self.focus = Focus::Region(at);
+        self.fresh_slot = Some(at);
+        self.mode_menu = true;
+        self.mode_sel = 0;
+    }
+
+    /// `Ctrl+W c`: close the FOCUSED slot. The ids are positions —
+    /// no renumbering; the last window refuses (quit stays the
+    /// explicit q); the focus lands on the nearest active slot in
+    /// reading order; the draft survives (the composer hides to
+    /// standby; i re-summons from any transcript window).
+    fn chord_close(&mut self) {
+        self.unzoom();
+        let Some(i) = self.region_focus() else {
+            self.flash = Some("focus a slot first".into());
+            return;
+        };
+        self.close_slot_index(i);
+    }
+
+    /// Close the window at region index `i` (the chord close and
+    /// the fresh picker's back share this path).
+    fn close_slot_index(&mut self, i: usize) {
+        let live = self.lattice.active.iter().filter(|a| **a).count();
+        if live <= 1 {
+            self.flash = Some("the last window stays".into());
+            return;
+        }
+        let n = self.slot_number(i);
+        // The nearest active slot in reading order: the predecessor,
+        // else the successor (the reading order never shifts).
+        let target_slot = (0..n - 1)
+            .rev()
+            .find(|&p| self.lattice.active[p])
+            .or_else(|| (n..4).find(|&p| self.lattice.active[p]))
+            .map(|p| p + 1)
+            .expect("checked: more than one slot live");
+        // Index-based bookkeeping re-homes through slot numbers
+        // BEFORE the mutation (the indices shift with the removal).
+        let host_slot = (self.compose_host != TEMP_VIEW && self.compose_host < self.regions.len())
+            .then(|| self.slot_number(self.compose_host));
+        let origin_slot =
+            (self.temp_origin < self.regions.len()).then(|| self.slot_number(self.temp_origin));
+        self.lattice.active[n - 1] = false;
+        self.regions.remove(i);
+        if self.show_compose && self.compose_host == i {
+            // Standby, not destroyed: the draft is construction
+            // state and survives the window.
+            self.show_compose = false;
+        }
+        if let Some(s) = host_slot
+            .filter(|s| self.lattice.active[s - 1])
+        {
+            self.compose_host = self.slot_index(s).expect("checked active");
+        }
+        if let Some(s) = origin_slot {
+            let alive = self.lattice.active[s - 1];
+            let s = if alive { s } else { target_slot };
+            self.temp_origin = self.slot_index(s).expect("target is active");
+        }
+        self.focus = Focus::Region(self.slot_index(target_slot).expect("target is active"));
+        self.fresh_slot = None;
+    }
+
+    /// `Ctrl+W z`: the zoom lens toggle (tmux mnemonic). The
+    /// focused slot fills the base; the lattice freezes underneath
+    /// and comes back exactly.
+    fn chord_zoom(&mut self) {
+        if self.region_focus().is_none() {
+            self.flash = Some("focus a slot first".into());
+            return;
+        }
+        self.zoom = !self.zoom;
+    }
+
+    /// The focus arms: the nearest active slot in that direction
+    /// along the focused slot's row/column; the edge refuses (the
+    /// nvim edge-beep analog).
+    fn chord_focus_dir(&mut self, dir: Dir) {
+        self.unzoom();
+        let Some(i) = self.region_focus() else {
+            self.flash = Some("focus a slot first".into());
+            return;
+        };
+        let n = self.slot_number(i);
+        let (row, col) = ((n - 1) / 2, (n - 1) % 2);
+        let scan: Box<dyn Iterator<Item = usize>> = match dir {
+            Dir::Left => Box::new((0..col).rev()),
+            Dir::Right => Box::new(col + 1..2),
+            Dir::Up => Box::new((0..row).rev()),
+            Dir::Down => Box::new(row + 1..2),
+        };
+        let (vary_row, word) = match dir {
+            Dir::Left => (false, "to the left"),
+            Dir::Right => (false, "to the right"),
+            Dir::Up => (true, "above"),
+            Dir::Down => (true, "below"),
+        };
+        let target = scan
+            .map(|v| if vary_row { (v, col) } else { (row, v) })
+            .map(|(r, c)| r * 2 + c)
+            .find(|&p| self.lattice.active[p]);
+        match target {
+            Some(p) => {
+                let idx = self.slot_index(p + 1).expect("checked active");
+                self.nav_to_region(idx);
+            }
+            None => self.flash = Some(format!("no window {word}")),
+        }
+    }
+
+    /// The column ratio only means something when BOTH columns are
+    /// live; a collapsed column has nothing to resize (flash).
+    fn chord_resize_column(&mut self, widen: bool) {
+        self.unzoom();
+        let Some(i) = self.region_focus() else {
+            self.flash = Some("focus a slot first".into());
+            return;
+        };
+        let n = self.slot_number(i);
+        let col = (n - 1) % 2;
+        let left_live = self.lattice.active[0] || self.lattice.active[2];
+        let right_live = self.lattice.active[1] || self.lattice.active[3];
+        if !(left_live && right_live) {
+            self.flash = Some("no column split".into());
+            return;
+        }
+        // '>' widens the focused slot's column: on the left that
+        // grows the share, on the right it shrinks it.
+        let grow = (col == 0) == widen;
+        let next = self.lattice.column + if grow { RESIZE_STEP } else { -RESIZE_STEP };
+        if next < RATIO_FLOOR || next > 1.0 - RATIO_FLOOR {
+            self.flash = Some("no room".into());
+            return;
+        }
+        self.lattice.column = next.clamp(RATIO_FLOOR, 1.0 - RATIO_FLOOR);
+    }
+
+    /// The row ratio only means something when BOTH rows are live.
+    fn chord_resize_row(&mut self, grow: bool) {
+        self.unzoom();
+        let Some(i) = self.region_focus() else {
+            self.flash = Some("focus a slot first".into());
+            return;
+        };
+        let n = self.slot_number(i);
+        let top_live = self.lattice.active[0] || self.lattice.active[1];
+        let bottom_live = self.lattice.active[2] || self.lattice.active[3];
+        if !(top_live && bottom_live) {
+            self.flash = Some("no row split".into());
+            return;
+        }
+        // '+' grows the focused slot's row: on the top that grows
+        // the top share, on the bottom it shrinks it.
+        let grow_share = ((n - 1) / 2 == 0) == grow;
+        let next = self.lattice.row
+            + if grow_share {
+                RESIZE_STEP
+            } else {
+                -RESIZE_STEP
+            };
+        if next < RATIO_FLOOR || next > 1.0 - RATIO_FLOOR {
+            self.flash = Some("no room".into());
+            return;
+        }
+        self.lattice.row = next.clamp(RATIO_FLOOR, 1.0 - RATIO_FLOOR);
+    }
+
+    /// `Ctrl+W =`: both ratios back to 50/50 (the stored values
+    /// matter even under a collapse — they return with the slot).
+    fn chord_equalize(&mut self) {
+        self.unzoom();
+        if self.region_focus().is_none() {
+            self.flash = Some("focus a slot first".into());
+            return;
+        }
+        self.lattice.column = 0.5;
+        self.lattice.row = 0.5;
     }
 
     /// The focused region's index (the composer has none — its host
@@ -637,11 +965,12 @@ impl App {
     /// current kind.
     fn open_mode_menu(&mut self) {
         self.mode_menu = true;
-        self.mode_sel = if self.focus == Focus::Temp && self.temp_fresh {
-            0
-        } else {
-            self.viewport(self.focus_region()).content.index()
-        };
+        self.mode_sel =
+            if (self.focus == Focus::Temp && self.temp_fresh) || self.fresh_slot.is_some() {
+                0
+            } else {
+                self.viewport(self.focus_region()).content.index()
+            };
     }
 
     /// Open the temp window (x): a modal overlay whose FIRST face
@@ -762,6 +1091,11 @@ impl App {
         } else {
             region.min(self.regions.len().saturating_sub(1))
         };
+        // A pick ends the fresh-until-pick state (the fresh slot's
+        // content is now real; its back rows read the chosen page).
+        // NOTE: before the same-content early return — picking the
+        // slot's standing content is still a pick.
+        self.fresh_slot = None;
         if self.viewport(region).content == kind {
             return;
         }
@@ -1522,12 +1856,26 @@ impl App {
                         // going back means closing the window (no
                         // content created).
                         self.close_temp();
+                    } else if let Some(f) = self.fresh_slot.take() {
+                        // The fresh slot's picker back = close the
+                        // fresh slot: nothing was created yet.
+                        if self.focus == Focus::Region(f) {
+                            self.close_slot_index(f);
+                        }
+                        self.mode_menu = false;
                     } else {
                         self.mode_menu = false;
                     }
                 }
                 _ => {}
             }
+            return;
+        }
+
+        // The armed window-op prefix eats every key until a chord
+        // completes or cancels (no overlay can open meanwhile).
+        if self.prefix_armed {
+            self.on_key_chord(key);
             return;
         }
 
@@ -1599,6 +1947,13 @@ impl App {
         // below), everything else runs with full dispatch parity
         // (ruling 10).
         if self.temp.is_some() && self.focus != Focus::Compose {
+            // The window-op prefix arms here too (D-Q2: arming is
+            // harmless; the slot-class chords answer with the flash,
+            // the viewport-class chord reaches the temp).
+            if key.code == KeyCode::Char('w') && key.modifiers == KeyModifiers::CONTROL {
+                self.prefix_armed = true;
+                return;
+            }
             match key.code {
                 KeyCode::Char('?') => self.show_help = true,
                 KeyCode::Char('q') => self.close_temp(),
@@ -1636,9 +1991,14 @@ impl App {
             return;
         }
 
-        // Region focus from here. The STRUCTURAL layer first (it
-        // works over every content), then the true globals, then the
-        // generic list motion, then the focused content's own keys.
+        // Region focus from here. The window-op prefix arms first
+        // (the nvim layering: the composer's typing layer keeps
+        // Ctrl+W = word drop; the popups and the picker eat keys
+        // before this line, so they never arm it).
+        if key.code == KeyCode::Char('w') && key.modifiers == KeyModifiers::CONTROL {
+            self.prefix_armed = true;
+            return;
+        }
         match key.code {
             // The help overlay (lazygit-style); the input panes
             // keep typing a literal '?'.
@@ -2299,6 +2659,245 @@ pub fn preview_bytes(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::from(KeyCode::Char(c))
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn the_window_prefix_arms_completes_and_cancels() {
+        let mut app = App::new();
+        // The prefix arms outside the typing layer.
+        app.on_key(ctrl('w'));
+        assert!(app.prefix_armed);
+        // The prefix again = cancel (no cycle op; Tab exists).
+        app.on_key(ctrl('w'));
+        assert!(!app.prefix_armed);
+        assert_eq!(app.regions.len(), 2);
+        // An unknown second stroke cancels with a flash.
+        app.on_key(ctrl('w'));
+        app.on_key(key('x'));
+        assert!(!app.prefix_armed);
+        assert_eq!(app.flash.as_deref(), Some("the window op canceled"));
+        // Esc cancels silently (the earlier flash is stale state;
+        // clear it to see the silence).
+        app.flash = None;
+        app.on_key(ctrl('w'));
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.prefix_armed);
+        assert!(app.flash.is_none() || app.flash.as_deref() != Some("the window op canceled"));
+    }
+
+    #[test]
+    fn ctrl_w_v_creates_the_right_neighbor_fresh_until_pick() {
+        let mut app = App::new();
+        // The default {1,2}: slot 1's right neighbor is already open.
+        app.on_key(ctrl('w'));
+        app.on_key(key('v'));
+        assert_eq!(app.flash.as_deref(), Some("window 2 is already open"));
+        // Close slot 2, then v re-opens it as a FRESH slot: the
+        // picker is its first face and its back closes the slot.
+        app.focus = Focus::Region(1);
+        app.on_key(ctrl('w'));
+        app.on_key(key('c'));
+        assert_eq!(app.regions.len(), 1);
+        app.last_base = (100, 30); // a geometry the guard accepts
+        app.on_key(ctrl('w'));
+        app.on_key(key('v'));
+        assert_eq!(app.regions.len(), 2);
+        assert!(app.mode_menu && app.fresh_slot == Some(1));
+        assert_eq!(app.focus, Focus::Region(1));
+        // Back (Esc) on the fresh picker closes the fresh slot.
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.regions.len(), 1);
+        assert!(!app.mode_menu && app.fresh_slot.is_none());
+        assert_eq!(app.focus, Focus::Region(0));
+    }
+
+    #[test]
+    fn ctrl_w_s_creates_below_and_a_pick_lands_the_content() {
+        let mut app = App::new();
+        app.last_base = (100, 30); // a geometry the guard accepts
+        app.on_key(ctrl('w'));
+        app.on_key(key('s'));
+        assert_eq!(app.regions.len(), 3);
+        assert_eq!(app.lattice.active, [true, true, true, false]);
+        assert_eq!(app.focus, Focus::Region(2)); // slot 3's index
+        assert!(app.mode_menu && app.fresh_slot == Some(2));
+        // Picking content 4 (mailboxes) lands it and ends fresh.
+        app.on_key(key('4'));
+        assert!(!app.mode_menu && app.fresh_slot.is_none());
+        assert_eq!(app.regions[2].content, ContentKind::Mailboxes);
+    }
+
+    #[test]
+    fn ctrl_w_c_closes_without_renumbering_and_the_last_window_stays() {
+        let mut app = App::new();
+        // {1,3}: closing slot 3 leaves slot 1's number untouched.
+        app.lattice.active = [true, false, true, false];
+        app.regions = vec![
+            Viewport::new(ContentKind::Threads),
+            Viewport::new(ContentKind::Transcript),
+        ];
+        app.focus = Focus::Region(1);
+        app.on_key(ctrl('w'));
+        app.on_key(key('c'));
+        assert_eq!(app.lattice.active, [true, false, false, false]);
+        assert_eq!(app.regions.len(), 1);
+        assert_eq!(app.focus, Focus::Region(0));
+        // The last window refuses to close (quit stays the q).
+        app.on_key(ctrl('w'));
+        app.on_key(key('c'));
+        assert_eq!(app.flash.as_deref(), Some("the last window stays"));
+        assert_eq!(app.regions.len(), 1);
+    }
+
+    #[test]
+    fn the_draft_survives_a_host_close() {
+        let mut app = App::new();
+        app.draft.insert_str("draft text");
+        app.show_compose = true;
+        app.compose_host = 1;
+        app.focus = Focus::Region(1);
+        app.on_key(ctrl('w'));
+        app.on_key(key('c'));
+        // The composer hides to standby; the draft is construction
+        // state and survives; i re-summons from any transcript.
+        assert!(!app.show_compose);
+        assert_eq!(app.draft.text(), "draft text");
+        assert_eq!(app.focus, Focus::Region(0));
+    }
+
+    #[test]
+    fn the_focus_arms_move_along_the_row_and_refuse_at_the_edge() {
+        let mut app = App::new();
+        // h from the leftmost slot: the edge refuses.
+        app.on_key(ctrl('w'));
+        app.on_key(key('h'));
+        assert_eq!(app.flash.as_deref(), Some("no window to the left"));
+        // l moves along the row.
+        app.on_key(ctrl('w'));
+        app.on_key(key('l'));
+        assert_eq!(app.focus, Focus::Region(1));
+        // After s creates slot 3 (its picker up: pick a content to
+        // leave the modal), j/k walk the column.
+        app.last_base = (100, 30);
+        app.on_key(ctrl('w'));
+        app.on_key(key('s'));
+        assert_eq!(app.focus, Focus::Region(2));
+        app.on_key(key('2')); // the pick ends the fresh picker
+        assert!(!app.mode_menu);
+        // The focus sits on slot 4 (s ran from slot 2: BELOW is 4).
+        // k walks UP the column to slot 2; j back down to slot 4.
+        app.on_key(ctrl('w'));
+        app.on_key(key('k'));
+        assert_eq!(app.focus, Focus::Region(1));
+        app.on_key(ctrl('w'));
+        app.on_key(key('j'));
+        assert_eq!(app.focus, Focus::Region(2));
+    }
+
+    #[test]
+    fn zoom_toggles_and_any_focus_or_geometry_op_unzooms() {
+        let mut app = App::new();
+        app.on_key(ctrl('w'));
+        app.on_key(key('z'));
+        assert!(app.zoom);
+        // A focus move ends the lens first, then the op runs.
+        app.on_key(KeyEvent::from(KeyCode::Tab));
+        assert!(!app.zoom);
+        assert_eq!(app.focus, Focus::Region(1));
+        // z again zooms; a geometry chord unzooms and resizes.
+        app.on_key(ctrl('w'));
+        app.on_key(key('z'));
+        assert!(app.zoom);
+        app.on_key(ctrl('w'));
+        app.on_key(key('>'));
+        assert!(!app.zoom);
+        // The focus sits on the RIGHT slot after the Tab: widening
+        // it shrinks the left share.
+        assert!((app.lattice.column - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resize_moves_the_focused_sides_and_inert_splits_flash() {
+        let mut app = App::new();
+        // {1,2}: the bottom row is collapsed — the row chords are
+        // inert; the column chords work.
+        app.on_key(ctrl('w'));
+        app.on_key(key('+'));
+        assert_eq!(app.flash.as_deref(), Some("no row split"));
+        app.on_key(ctrl('w'));
+        app.on_key(key('>'));
+        assert!((app.lattice.column - 0.35).abs() < 1e-9);
+        // Widening from the RIGHT slot shrinks the left share.
+        app.focus = Focus::Region(1);
+        app.on_key(ctrl('w'));
+        app.on_key(key('>'));
+        assert!((app.lattice.column - 0.30).abs() < 1e-9);
+        // = equalizes both ratios (the stored row survives a
+        // collapse and returns with the slot).
+        app.on_key(ctrl('w'));
+        app.on_key(key('='));
+        assert_eq!(app.lattice.column, 0.5);
+        assert_eq!(app.lattice.row, 0.5);
+        // {1,3}: the right column is collapsed — the column chords
+        // are inert there; the row chords work.
+        app.lattice.active = [true, false, true, false];
+        app.regions = vec![
+            Viewport::new(ContentKind::Threads),
+            Viewport::new(ContentKind::Transcript),
+        ];
+        app.on_key(ctrl('w'));
+        app.on_key(key('<'));
+        assert_eq!(app.flash.as_deref(), Some("no column split"));
+        app.on_key(ctrl('w'));
+        app.on_key(key('-'));
+        // The focus sits on slot 3 (the bottom row): shrinking it
+        // grows the top share.
+        assert!((app.lattice.row - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_too_small_target_is_a_silent_noop() {
+        let mut app = App::new();
+        // A 30x20 base: slot 3's quadrant would be 9 wide — below
+        // the floor; the chord does NOTHING (no flash, no state).
+        app.last_base = (30, 20);
+        app.on_key(ctrl('w'));
+        app.on_key(key('s'));
+        assert_eq!(app.lattice.active, [true, true, false, false]);
+        assert!(app.flash.is_none());
+        // A fitting base opens the slot normally.
+        app.last_base = (100, 30);
+        app.on_key(ctrl('w'));
+        app.on_key(key('s'));
+        assert_eq!(app.lattice.active, [true, true, true, false]);
+        assert_eq!(app.regions.len(), 3);
+    }
+
+    #[test]
+    fn the_temp_refuses_slot_ops_but_takes_the_mode() {
+        let mut app = App::new();
+        app.temp = Some(Viewport::new(ContentKind::Threads));
+        app.temp_fresh = false;
+        app.focus = Focus::Temp;
+        // The slot-class chords flash (the temp has no slot).
+        app.on_key(ctrl('w'));
+        app.on_key(key('v'));
+        assert_eq!(app.flash.as_deref(), Some("focus a slot first"));
+        // The viewport-class chord reaches the temp: the mode opens
+        // over it.
+        app.on_key(ctrl('w'));
+        app.on_key(key('m'));
+        assert!(app.mode_menu);
+    }
+
     use super::*;
 
     #[test]

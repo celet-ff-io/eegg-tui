@@ -135,7 +135,7 @@ fn render_fp_popup(app: &App, f: &mut Frame) {
         Line::from(""),
         Line::from(Span::from(format!("  {full}")).yellow().bold()),
         Line::from(""),
-        Line::from(hint_spans("c copy · Esc/m close")),
+        Line::from(hint_spans("c copy · Esc close · m mode")),
     ];
     Paragraph::new(lines)
         .block(
@@ -201,7 +201,15 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
     // list rows, the keys right-aligned with the 1-4 numbers,
     // set off by one blank line — the blank line is what says
     // j/k stops above them.
-    let back = current.title();
+    // The back rows' target: the pre-modes page — for a FRESH temp
+    // window there is none (the picker is its first face), so back
+    // means closing the window; say so instead of lying about a
+    // page that does not exist.
+    let back = if i == crate::app::TEMP_VIEW && app.temp_fresh {
+        "close"
+    } else {
+        current.title()
+    };
     let rows = [
         ("m", back, Style::new().dark_gray()),
         ("Esc", back, Style::new().dark_gray().italic()),
@@ -298,7 +306,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "1..4",
             "jump direct to a content (the current closes)",
         ),
-        (true, "Esc/m", "close, no change"),
+        (true, "Esc/m", "back to the pre-modes page (no change)"),
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
         (true, "n", "new thread (fresh chain on the next send)"),

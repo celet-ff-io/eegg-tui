@@ -525,6 +525,20 @@ impl App {
         }
     }
 
+    /// m OUTSIDE the modes picker: switch the focused view to the
+    /// modes picker (the principal — m's meaning is "switch to the
+    /// mode-select state"; only INSIDE the picker does m mean
+    /// back). The fresh temp starts at the top; else at the
+    /// current kind.
+    fn open_mode_menu(&mut self) {
+        self.mode_menu = true;
+        self.mode_sel = if self.focus == Focus::Temp && self.temp_fresh {
+            0
+        } else {
+            self.viewport(self.focus_region()).content.index()
+        };
+    }
+
     /// Open the temp window (x): a modal overlay whose FIRST face
     /// is the modes picker (the principal — the quick profile is
     /// open-temp + pick; `p` is retired). Focus memory: the origin
@@ -550,6 +564,7 @@ impl App {
         }
         self.mode_menu = false;
         self.temp = None;
+        self.temp_fresh = false;
         self.focus = Focus::Region(self.temp_origin);
     }
 
@@ -1212,6 +1227,13 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.help_scroll = self.help_scroll.saturating_add(1);
                 }
+                // m switches to the modes picker (its meaning
+                // everywhere outside the picker itself).
+                KeyCode::Char('m') => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                    self.open_mode_menu();
+                }
                 _ => {}
             }
             return;
@@ -1270,6 +1292,13 @@ impl App {
                     self.show_log = false;
                     self.log_scroll = 0;
                 }
+                // m switches to the modes picker (its meaning
+                // everywhere outside the picker itself).
+                KeyCode::Char('m') => {
+                    self.show_log = false;
+                    self.log_scroll = 0;
+                    self.open_mode_menu();
+                }
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.log_scroll = self.log_scroll.saturating_sub(1);
                 }
@@ -1282,9 +1311,11 @@ impl App {
         }
 
         // The fingerprint popup: the selected identity's FULL form
-        // (a frozen snapshot). Esc/m/q close (q follows the log
+        // (a frozen snapshot). Esc/q close (q follows the log
         // popup's precedent: a stray q quits from the main surface,
-        // never from inside a popup); c copies the full form.
+        // never from inside a popup); c copies the full form; m
+        // switches to the modes picker (m's meaning everywhere
+        // outside the picker itself).
         if self.fp_shown.is_some() {
             match key.code {
                 KeyCode::Char('c') => {
@@ -1294,7 +1325,11 @@ impl App {
                         |()| "full fingerprint copied".to_owned(),
                     ));
                 }
-                KeyCode::Esc | KeyCode::Char('m') | KeyCode::Char('q') => {
+                KeyCode::Char('m') => {
+                    self.fp_shown = None;
+                    self.open_mode_menu();
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
                     self.fp_shown = None;
                 }
                 _ => {}
@@ -1315,16 +1350,8 @@ impl App {
                     self.show_log = true;
                     self.log_scroll = 0;
                 }
-                // The picker: m opens it (the fresh temp starts at
-                // the top; else at the current kind).
-                KeyCode::Char('m') => {
-                    self.mode_menu = true;
-                    self.mode_sel = if self.temp_fresh {
-                        0
-                    } else {
-                        self.viewport(TEMP_VIEW).content.index()
-                    };
-                }
+                // The picker: m opens it.
+                KeyCode::Char('m') => self.open_mode_menu(),
                 // Standby composer: Esc hides it first (its one
                 // extra function over the default state).
                 KeyCode::Esc if self.show_compose => {
@@ -1381,10 +1408,7 @@ impl App {
             // this region, the cursor starting on the current
             // content. `o` stays free for the transcript's future
             // open-file key (the multimedia era).
-            KeyCode::Char('m') => {
-                self.mode_menu = true;
-                self.mode_sel = self.viewport(self.focus_region()).content.index();
-            }
+            KeyCode::Char('m') => self.open_mode_menu(),
             // The temp window (x): a modal overlay whose first face
             // is the modes picker — the quick profile is open-temp +
             // pick (`p` is retired).
@@ -2077,6 +2101,26 @@ mod tests {
         assert!(app.new_thread_intent);
         assert_eq!(app.regions[0].content, ContentKind::Transcript);
         assert!(matches!(app.focus, Focus::Compose));
+    }
+
+    #[test]
+    fn m_outside_the_picker_switches_to_the_modes_picker() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        // Inside the fingerprint popup: m closes it AND switches to
+        // the modes picker (m never means "close").
+        app.focus = Focus::Region(1);
+        app.regions[1].content = ContentKind::Authors;
+        app.fp_shown = Some("sha3-256:00".into());
+        app.on_key(KeyEvent::from(KeyCode::Char('m')));
+        assert!(app.fp_shown.is_none());
+        assert!(app.mode_menu);
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+
+        // Inside the modes picker itself: m means back.
+        app.mode_menu = true;
+        app.on_key(KeyEvent::from(KeyCode::Char('m')));
+        assert!(!app.mode_menu);
     }
 
     #[test]

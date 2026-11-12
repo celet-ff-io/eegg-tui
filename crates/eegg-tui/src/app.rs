@@ -1817,6 +1817,11 @@ pub fn digest_preview(b: &[u8]) -> String {
 /// digest (these display sites hold the anchor — the digest — with
 /// the key long gone); the pin test ties the two forms together.
 pub fn fp_short(digest: &[u8]) -> String {
+    if digest.len() < 8 {
+        // A malformed anchor can never produce a short form; the
+        // interface renders what the core reports — an empty head.
+        return String::new();
+    }
     digest[..8]
         .chunks(2)
         .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))

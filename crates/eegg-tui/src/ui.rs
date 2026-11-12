@@ -441,9 +441,15 @@ fn render_log_popup(app: &App, f: &mut Frame) {
 /// its record signatures cannot verify until re-exchanged), the
 /// endpoints; `tag` marks the self row.
 fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
+    // The CANON short form (the KR-merged F1): the sign key is at
+    // hand here, so `Fingerprint::short` speaks directly.
+    let fp = <[u8; zconned_crypto::SIGN_PUB_LEN]>::try_from(p.sign_pub.as_slice())
+        .ok()
+        .map(|sign| zconned_crypto::Fingerprint::of(&sign).short())
+        .unwrap_or_else(|| "(malformed key)".to_owned());
     let mut line = vec![
         Span::from(tag.to_owned()).yellow(),
-        Span::from(fp_short(&anchor_of(p))).cyan(),
+        Span::from(fp).cyan(),
         Span::from(format!(" {} + {}", p.sign_algo, p.dh_algo)).dark_gray(),
     ];
     match &p.record_sign_pub {

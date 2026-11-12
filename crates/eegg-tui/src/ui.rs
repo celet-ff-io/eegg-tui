@@ -285,7 +285,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 60] = [
+    let rows: [(bool, &str, &str); 59] = [
         (false, "global", ""),
         (
             true,
@@ -349,8 +349,11 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "i",
             "summon the composer (transcript only; typing mode)",
         ),
-        (true, "<Ctrl+Enter>", "send the compose text"),
-        (true, "<Alt+Enter>", "send the compose text (either works)"),
+        (
+            true,
+            "<Ctrl+Enter/Alt+Enter>",
+            "send the compose text (either works)",
+        ),
         (true, "<Ctrl+W>", "drop the word before the caret"),
         (
             true,
@@ -1084,7 +1087,7 @@ fn keybar_hints(app: &App) -> &'static str {
     // Typing: the editor face. (Standby shows the focused content's
     // face below — standby IS the default state.)
     if app.focus == Focus::Compose {
-        return "<Ctrl+Enter>/<Alt+Enter> send · <Ctrl+W> drop word · <Ctrl+U> clear · <Ctrl+V> paste · <Ctrl+C> copy · <Ctrl+R>/<Ctrl+S> file · Esc standby";
+        return "<Ctrl+Enter/Alt+Enter> send · <Ctrl+W> drop word · <Ctrl+U> clear · <Ctrl+V> paste · <Ctrl+C> copy · <Ctrl+R>/<Ctrl+S> file · Esc standby";
     }
     match app.viewport(app.focus_region()).content {
         ContentKind::Threads => {

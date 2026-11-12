@@ -1376,6 +1376,14 @@ impl App {
         match self.viewport(fi).content {
             ContentKind::Threads => match key.code {
                 KeyCode::Char('t') => self.refresh_threads(),
+                // New thread from the threads list too: the composer
+                // summons into this view's transcript (the keybar
+                // hint promises n here — the binding was
+                // transcript-only and the principal hit the gap).
+                KeyCode::Char('n') => {
+                    self.summon_compose(fi, true);
+                    self.flash = Some("new thread".into());
+                }
                 KeyCode::Enter => self.open_selected_thread(fi),
                 _ => {}
             },
@@ -1555,12 +1563,12 @@ impl App {
                     (Some(r), _) if r.digest.is_empty() => "resource: empty ref".into(),
                     (Some(r), Some(v)) => format!(
                         "resource {} = {} ({})",
-                        short_hex(&r.digest),
+                        digest_preview(&r.digest),
                         preview_bytes(&v.data),
                         v.kind
                     ),
                     (Some(r), None) => {
-                        format!("resource {} = (missing)", short_hex(&r.digest))
+                        format!("resource {} = (missing)", digest_preview(&r.digest))
                     }
                     (None, _) => "resource: no ref".into(),
                 });
@@ -1791,8 +1799,29 @@ impl App {
     }
 }
 
-pub fn short_hex(b: &[u8]) -> String {
+/// A machine-id / content-digest head preview: the first 6 bytes,
+/// continuous lowercase hex. NOT an identity fingerprint — the
+/// identity display is `fp_short` (F1); the MsgRef thread-id forms
+/// and the content/resource digests keep this continuous preview.
+pub fn digest_preview(b: &[u8]) -> String {
     b.iter().take(6).map(|x| format!("{x:02x}")).collect()
+}
+
+/// The identity fingerprint's SHORT display form (F1 — the
+/// standard fingerprint display notation memo): the digest's
+/// FIRST 8 bytes, lowercase
+/// hex, grouped 2 bytes per 4-hex block, space-joined (`1a2b 3c4d
+/// 5e6f 7890`). DISPLAY ONLY — any verification decision uses the
+/// full `sha3-256:<hex>` notation. This mirrors the canon
+/// `zconned_crypto::Fingerprint::short` over an ALREADY-COMPUTED
+/// digest (these display sites hold the anchor — the digest — with
+/// the key long gone); the pin test ties the two forms together.
+pub fn fp_short(digest: &[u8]) -> String {
+    digest[..8]
+        .chunks(2)
+        .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn preview_bytes(data: &[u8]) -> String {
@@ -1951,6 +1980,35 @@ mod tests {
         assert!(app.temp.is_none());
         assert!(matches!(app.focus, Focus::Region(1)));
         assert_eq!(app.regions[1].content, ContentKind::Mailboxes);
+    }
+
+    #[test]
+    fn n_new_thread_works_from_the_threads_list() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        // The threads list (region 0's default content): n summons
+        // the composer with the fresh-chain intent — the keybar
+        // hint promised this; the binding used to be transcript-only.
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(app.show_compose);
+        assert!(app.new_thread_intent);
+        assert_eq!(app.regions[0].content, ContentKind::Transcript);
+        assert!(matches!(app.focus, Focus::Compose));
+    }
+
+    #[test]
+    fn fp_short_is_the_canon_short_form_of_the_same_digest() {
+        // F1: the short form is the full form's GROUPED HEAD — the
+        // local helper (over an already-computed digest) must equal
+        // the canon `Fingerprint::short` (over the key) byte for
+        // byte, or the two UIs cannot be cross-checked.
+        let sign = [7u8; zconned_crypto::SIGN_PUB_LEN];
+        let fp = zconned_crypto::Fingerprint::of(&sign);
+        assert_eq!(fp_short(fp.digest()), fp.short());
+        // The shape itself: 8 bytes, 4 grouped blocks.
+        let text = fp.short();
+        assert_eq!(text.len(), 4 * 4 + 3);
+        assert_eq!(text.matches(' ').count(), 3);
     }
 
     #[test]

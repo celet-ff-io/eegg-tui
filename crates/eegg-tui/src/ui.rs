@@ -17,7 +17,9 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
-use crate::app::{App, CardFlow, ContentKind, Focus, anchor_of, preview_bytes, short_hex};
+use crate::app::{
+    App, CardFlow, ContentKind, Focus, anchor_of, digest_preview, fp_short, preview_bytes,
+};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -441,7 +443,7 @@ fn render_log_popup(app: &App, f: &mut Frame) {
 fn peer_item(p: &zconned_stdio_types::Peer, tag: &str) -> ListItem<'static> {
     let mut line = vec![
         Span::from(tag.to_owned()).yellow(),
-        Span::from(short_hex(&anchor_of(p))).cyan(),
+        Span::from(fp_short(&anchor_of(p))).cyan(),
         Span::from(format!(" {} + {}", p.sign_algo, p.dh_algo)).dark_gray(),
     ];
     match &p.record_sign_pub {
@@ -615,7 +617,7 @@ fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
         .iter()
         .map(|(a, entry)| {
             let in_book = app.peers.iter().any(|p| &anchor_of(p) == a);
-            let fallback = short_hex(a);
+            let fallback = fp_short(a);
             let shown = entry
                 .remark
                 .as_deref()
@@ -737,7 +739,7 @@ fn render_threads(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
     let items: Vec<ListItem> = app
         .threads
         .iter()
-        .map(|t| ListItem::from(Span::from(short_hex(&t.digest))))
+        .map(|t| ListItem::from(Span::from(digest_preview(&t.digest))))
         .collect();
     let list = List::new(items)
         .block(
@@ -794,7 +796,7 @@ fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prel
             let overlay = app.locals.get(&digest);
             let confirmed =
                 !from.is_empty() && overlay.is_some_and(|o| o.signers.iter().any(|a| a == &from));
-            let fallback = short_hex(&from);
+            let fallback = fp_short(&from);
             let author = (!from.is_empty()).then(|| {
                 overlay
                     .and_then(|o| o.author_remark.as_deref())
@@ -838,7 +840,7 @@ fn entry_item(
     let digest = e
         .meta
         .as_ref()
-        .map(|m| short_hex(&m.digest))
+        .map(|m| digest_preview(&m.digest))
         .unwrap_or_default();
     let content = e.content.as_ref().map(|slot| match &slot.value {
         Some(v) => format!("{} \u{2014} {}", v.kind, preview_bytes(&v.data)),

@@ -40,6 +40,11 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub log_file: Option<std::path::PathBuf>,
 
+    /// Print the third-party license bundle to stdout and exit. The
+    /// TUI carries no license mode — the terminal prints text.
+    #[arg(long)]
+    pub license: bool,
+
     #[command(flatten)]
     pub verbose: Verbosity<WarnLevel>,
 }

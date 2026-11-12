@@ -14,6 +14,7 @@ pub mod clipboard;
 pub mod core;
 pub mod draft;
 pub mod events;
+pub mod license;
 pub mod paths;
 pub mod ui;
 

@@ -89,6 +89,11 @@ impl ContentKind {
     }
 }
 
+/// The temp window's view index: the dispatch table reads it
+/// through `viewport`, so the temp window has full dispatch
+/// parity with a region (ruling 10) without being a region.
+pub(crate) const TEMP_VIEW: usize = 2;
+
 /// One region: which content it shows, plus that content's VIEW
 /// state. The view state is per-region on purpose — the same content
 /// open in both regions keeps independent cursors; the DATA it
@@ -135,6 +140,9 @@ impl Viewport {
 pub enum Focus {
     Region(usize),
     Compose,
+    /// The temp window (a modal overlay — it owns the keys while
+    /// it is up; closing returns focus to the origin region).
+    Temp,
 }
 
 #[derive(Debug)]
@@ -146,12 +154,19 @@ pub struct App {
     /// The composer renders inside its HOST region's transcript —
     /// fixed at summon time.
     pub compose_host: usize,
-    /// The mode: entering it turns the WHOLE window into the
-    /// selection surface (not a small popup) — a modal that eats
-    /// every key until closed. `mode_sel` is the highlighted
-    /// entry (j/k move it, Enter opens it, 1-4 jump direct).
+    /// The mode: entering it turns the focused view into the
+    /// selection surface — a modal that eats every key until
+    /// closed. `mode_sel` is the highlighted entry (j/k move it,
+    /// Enter opens it, 1-4 jump direct).
     pub mode_menu: bool,
     pub mode_sel: usize,
+    /// The temp window: at most one (ruling 9). A modal overlay —
+    /// the popups stack over it, Esc pops it back to the origin
+    /// region. `temp_fresh` = the picker is its first face (no
+    /// content chosen yet; going back then closes the window).
+    pub temp: Option<Viewport>,
+    pub temp_origin: usize,
+    pub temp_fresh: bool,
     pub threads: Vec<MsgRef>,
     pub entries: Vec<Entry>,
     /// The thread whose log the transcript currently shows (the reply
@@ -328,6 +343,9 @@ impl App {
             compose_host: 1,
             mode_menu: false,
             mode_sel: 0,
+            temp: None,
+            temp_origin: 0,
+            temp_fresh: false,
             threads: Vec::new(),
             entries: Vec::new(),
             open_thread: None,
@@ -440,27 +458,84 @@ impl App {
     pub(crate) fn focus_region(&self) -> usize {
         match self.focus {
             Focus::Region(i) => i.min(self.regions.len().saturating_sub(1)),
-            Focus::Compose => self.compose_host.min(self.regions.len().saturating_sub(1)),
+            Focus::Temp => TEMP_VIEW,
+            Focus::Compose => self.compose_host,
         }
+    }
+
+    /// Any VIEW by index: a region (0/1) or the temp window
+    /// (TEMP_VIEW) — one dispatch table for both (ruling 10).
+    pub(crate) fn viewport(&self, i: usize) -> &Viewport {
+        if i == TEMP_VIEW {
+            self.temp.as_ref().expect("the temp viewport")
+        } else {
+            &self.regions[i]
+        }
+    }
+
+    pub(crate) fn viewport_mut(&mut self, i: usize) -> &mut Viewport {
+        if i == TEMP_VIEW {
+            self.temp.as_mut().expect("the temp viewport")
+        } else {
+            &mut self.regions[i]
+        }
+    }
+
+    /// Focus a VIEW: a region (0/1) or the temp window (TEMP_VIEW).
+    fn set_focus_view(&mut self, i: usize) {
+        self.focus = if i == TEMP_VIEW {
+            Focus::Temp
+        } else {
+            Focus::Region(i)
+        };
+    }
+
+    /// Open the temp window (x): a modal overlay whose FIRST face
+    /// is the modes picker (the principal — the quick profile is
+    /// open-temp + pick; `p` is retired). Focus memory: the origin
+    /// region is remembered for the pop-back (ruling 11).
+    fn open_temp(&mut self) {
+        self.temp_origin = self.focus_region();
+        self.temp = Some(Viewport::new(ContentKind::Threads));
+        self.temp_fresh = true;
+        self.mode_menu = true;
+        self.mode_sel = 0;
+        self.focus = Focus::Temp;
+    }
+
+    /// Close the temp window: focus returns to the origin region
+    /// (ruling 11; the layout and the regions are untouched). A
+    /// composer hosted by the temp collapses with it (its surface
+    /// is gone) and its draft goes with the window.
+    fn close_temp(&mut self) {
+        if self.compose_host == TEMP_VIEW {
+            self.show_compose = false;
+            self.draft.clear();
+            self.compose_host = self.temp_origin;
+        }
+        self.mode_menu = false;
+        self.temp = None;
+        self.focus = Focus::Region(self.temp_origin);
     }
 
     /// PgUp/PgDn: the selection moves by a page (the focused
     /// region's last rendered transcript viewport height; a sane
     /// page before first paint).
     fn page_sel(&mut self, dir: isize) {
-        let page = self.regions[self.focus_region()].page_rows.max(2) as isize - 1;
+        let page = (self.viewport(self.focus_region()).page_rows.max(2) as isize) - 1;
         self.move_sel(dir * page);
     }
 
     fn move_sel(&mut self, delta: isize) {
         let fi = self.focus_region();
-        let kind = self.regions[fi].content;
-        let (list, len) = match kind {
-            ContentKind::Threads => (&mut self.regions[fi].threads_sel, self.threads.len()),
-            ContentKind::Transcript => (&mut self.regions[fi].transcript_sel, self.entries.len()),
-            ContentKind::Authors => (&mut self.regions[fi].authors_sel, self.authors.len()),
-            ContentKind::Mailboxes => (&mut self.regions[fi].mailboxes_sel, self.peers.len() + 1),
+        let kind = self.viewport(fi).content;
+        let len = match kind {
+            ContentKind::Threads => self.threads.len(),
+            ContentKind::Transcript => self.entries.len(),
+            ContentKind::Authors => self.authors.len(),
+            ContentKind::Mailboxes => self.peers.len() + 1,
         };
+        let list = self.viewport_mut(fi).sel_mut();
         let Some(i) = list.selected() else {
             if len > 0 {
                 list.select(Some(0));
@@ -474,7 +549,7 @@ impl App {
     /// The active list's length (for g/G jump-to-end).
     fn sel_len(&self) -> usize {
         let fi = self.focus_region();
-        match self.regions[fi].content {
+        match self.viewport(fi).content {
             ContentKind::Threads => self.threads.len(),
             ContentKind::Transcript => self.entries.len(),
             ContentKind::Authors => self.authors.len(),
@@ -486,7 +561,7 @@ impl App {
     fn sel_home(&mut self) {
         let fi = self.focus_region();
         let has = self.sel_len() > 0;
-        self.regions[fi]
+        self.viewport_mut(fi)
             .sel_mut()
             .select(if has { Some(0) } else { None });
     }
@@ -495,40 +570,49 @@ impl App {
     fn sel_end(&mut self) {
         let fi = self.focus_region();
         let n = self.sel_len();
-        self.regions[fi]
+        self.viewport_mut(fi)
             .sel_mut()
             .select(if n > 0 { Some(n - 1) } else { None });
     }
 
-    /// Switch a region's content (the mode's 1..4, `p`, opening a
-    /// thread). Switching the composer's host region away from the
+    /// Switch a view's content (the mode's 1..4, opening a
+    /// thread). Switching the composer's host view away from the
     /// transcript collapses the composer — its surface is gone.
     fn set_region_content(&mut self, region: usize, kind: ContentKind) {
-        let region = region.min(self.regions.len().saturating_sub(1));
-        if self.regions[region].content == kind {
+        let region = if region == TEMP_VIEW {
+            TEMP_VIEW
+        } else {
+            region.min(self.regions.len().saturating_sub(1))
+        };
+        if self.viewport(region).content == kind {
             return;
         }
         if self.show_compose && self.compose_host == region {
             self.show_compose = false;
             if self.focus == Focus::Compose {
-                self.focus = Focus::Region(region);
+                self.set_focus_view(region);
             }
         }
-        self.regions[region].content = kind;
+        self.viewport_mut(region).content = kind;
         match kind {
             // One refresh per activation (cheap; the sets are small).
             ContentKind::Mailboxes => {
-                self.regions[region].mailboxes_sel.select(Some(0));
+                self.viewport_mut(region).mailboxes_sel.select(Some(0));
                 self.refresh_peers();
                 self.refresh_self();
                 self.refresh_identities();
             }
             // A fresh wholesale get per activation of the registry.
             ContentKind::Authors => {
-                self.regions[region].authors_sel.select(Some(0));
+                self.viewport_mut(region).authors_sel.select(Some(0));
                 self.refresh_identities();
             }
             _ => {}
+        }
+        if region == TEMP_VIEW {
+            // Content chosen: the temp window is no longer fresh
+            // (its back entries now mean the chosen page).
+            self.temp_fresh = false;
         }
     }
 
@@ -536,8 +620,13 @@ impl App {
     /// (reads are cursor-independent — browsing never moves the
     /// anchor) and turn the region into its transcript.
     fn open_selected_thread(&mut self, region: usize) {
-        let fi = region.min(self.regions.len().saturating_sub(1));
-        let thread = self.regions[fi]
+        let fi = if region == TEMP_VIEW {
+            TEMP_VIEW
+        } else {
+            region.min(self.regions.len().saturating_sub(1))
+        };
+        let thread = self
+            .viewport(fi)
             .threads_sel
             .selected()
             .and_then(|i| self.threads.get(i).cloned());
@@ -551,13 +640,13 @@ impl App {
                 })),
             });
             self.set_region_content(fi, ContentKind::Transcript);
-            self.regions[fi].transcript_sel.select(Some(0));
+            self.viewport_mut(fi).transcript_sel.select(Some(0));
         }
     }
 
     /// The selected author's anchor (BTreeMap order = anchor order).
     fn selected_author(&self) -> Option<Vec<u8>> {
-        let i = self.regions[self.focus_region()].authors_sel.selected()?;
+        let i = self.viewport(self.focus_region()).authors_sel.selected()?;
         self.authors.keys().nth(i).cloned()
     }
 
@@ -582,7 +671,8 @@ impl App {
     /// The selected transcript row of the FOCUSED region (the
     /// yank/write target).
     fn selected_entry(&self) -> Option<&zconned_stdio_types::Entry> {
-        let i = self.regions[self.focus_region()]
+        let i = self
+            .viewport(self.focus_region())
             .transcript_sel
             .selected()?;
         self.entries.get(i)
@@ -595,12 +685,12 @@ impl App {
     /// authors — the anchor's card, only if the book holds that
     /// mailbox.
     fn selected_card(&self) -> Option<String> {
-        match self.regions[self.focus_region()].content {
+        match self.viewport(self.focus_region()).content {
             ContentKind::Authors => self
                 .selected_author()
                 .and_then(|a| self.peers.iter().find(|p| anchor_of(p) == a).map(card_text)),
             ContentKind::Mailboxes => {
-                match self.regions[self.focus_region()].mailboxes_sel.selected() {
+                match self.viewport(self.focus_region()).mailboxes_sel.selected() {
                     Some(i) if i > 0 => self.peers.get(i - 1).map(card_text),
                     _ => self.self_card.clone(),
                 }
@@ -724,6 +814,12 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
+            // The temp window is modal: a composer hosted by it has
+            // no structural way out (the Esc stack pops: input ->
+            // temp -> origin region).
+            if self.compose_host == TEMP_VIEW {
+                return;
+            }
             match key.code {
                 KeyCode::Char('h') | KeyCode::Left => self.nav_to_region(0),
                 KeyCode::Char('l') | KeyCode::Right => self.nav_to_region(1),
@@ -737,7 +833,7 @@ impl App {
         match key.code {
             // Leave typing: standby (visible, unfocused, the normal
             // UI everywhere; Esc again hides the composer).
-            KeyCode::Esc => self.focus = Focus::Region(self.compose_host),
+            KeyCode::Esc => self.set_focus_view(self.compose_host),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.draft.clear();
             }
@@ -784,7 +880,7 @@ impl App {
         }
         self.draft.clear();
         self.show_compose = false;
-        self.focus = Focus::Region(self.compose_host);
+        self.set_focus_view(self.compose_host);
         // The timestamp discipline: the interface keeps the
         // "stamped" state (a stamp within the last window). When the
         // state is down, a stamp MESSAGE commits first and the text
@@ -1108,7 +1204,16 @@ impl App {
                     self.mode_menu = false;
                     self.set_region_content(self.focus_region(), ContentKind::nth(self.mode_sel));
                 }
-                KeyCode::Esc | KeyCode::Char('m') => self.mode_menu = false,
+                KeyCode::Esc | KeyCode::Char('m') => {
+                    if self.focus == Focus::Temp && self.temp_fresh {
+                        // The picker is the temp window's first face:
+                        // going back means closing the window (no
+                        // content created).
+                        self.close_temp();
+                    } else {
+                        self.mode_menu = false;
+                    }
+                }
                 KeyCode::Char('q') => self.quit = true,
                 _ => {}
             }
@@ -1137,6 +1242,52 @@ impl App {
                     self.log_scroll = self.log_scroll.saturating_add(1);
                 }
                 _ => {}
+            }
+            return;
+        }
+
+        // The temp window: a modal overlay (the profile-popup
+        // pattern — the popups above stack over it). No structural
+        // navigation out of it: Esc pops it back to the origin
+        // region, q quits, everything else runs with full dispatch
+        // parity (ruling 10).
+        if self.temp.is_some() && self.focus != Focus::Compose {
+            match key.code {
+                KeyCode::Char('?') => self.show_help = true,
+                KeyCode::Char('q') => self.quit = true,
+                KeyCode::Char('L') => {
+                    self.show_log = true;
+                    self.log_scroll = 0;
+                }
+                // The picker: m opens it (the fresh temp starts at
+                // the top; else at the current kind).
+                KeyCode::Char('m') => {
+                    self.mode_menu = true;
+                    self.mode_sel = if self.temp_fresh {
+                        0
+                    } else {
+                        self.viewport(TEMP_VIEW).content.index()
+                    };
+                }
+                // Standby composer: Esc hides it first (its one
+                // extra function over the default state).
+                KeyCode::Esc if self.show_compose => {
+                    self.show_compose = false;
+                }
+                KeyCode::Esc => self.close_temp(),
+                KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
+                KeyCode::Home | KeyCode::Char('g') => self.sel_home(),
+                KeyCode::End | KeyCode::Char('G') => self.sel_end(),
+                KeyCode::PageUp if self.viewport(TEMP_VIEW).content == ContentKind::Transcript => {
+                    self.page_sel(-1)
+                }
+                KeyCode::PageDown
+                    if self.viewport(TEMP_VIEW).content == ContentKind::Transcript =>
+                {
+                    self.page_sel(1)
+                }
+                _ => self.on_key_content(key),
             }
             return;
         }
@@ -1176,14 +1327,12 @@ impl App {
             // open-file key (the multimedia era).
             KeyCode::Char('m') => {
                 self.mode_menu = true;
-                self.mode_sel = self.regions[self.focus_region()].content.index();
+                self.mode_sel = self.viewport(self.focus_region()).content.index();
             }
-            // The mailboxes, right here: focus stays, the content
-            // swaps.
-            KeyCode::Char('p') => {
-                let fi = self.focus_region();
-                self.set_region_content(fi, ContentKind::Mailboxes);
-            }
+            // The temp window (x): a modal overlay whose first face
+            // is the modes picker — the quick profile is open-temp +
+            // pick (`p` is retired).
+            KeyCode::Char('x') => self.open_temp(),
             KeyCode::Char('h') => self.nav_to_region(0),
             KeyCode::Char('l') => self.nav_to_region(1),
             // The core's stderr ring — the diagnosis window (a talky
@@ -1206,12 +1355,12 @@ impl App {
             // The transcript pages by the region's last rendered
             // viewport.
             KeyCode::PageUp
-                if self.regions[self.focus_region()].content == ContentKind::Transcript =>
+                if self.viewport(self.focus_region()).content == ContentKind::Transcript =>
             {
                 self.page_sel(-1)
             }
             KeyCode::PageDown
-                if self.regions[self.focus_region()].content == ContentKind::Transcript =>
+                if self.viewport(self.focus_region()).content == ContentKind::Transcript =>
             {
                 self.page_sel(1)
             }
@@ -1224,7 +1373,7 @@ impl App {
     fn on_key_content(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
         let fi = self.focus_region();
-        match self.regions[fi].content {
+        match self.viewport(fi).content {
             ContentKind::Threads => match key.code {
                 KeyCode::Char('t') => self.refresh_threads(),
                 KeyCode::Enter => self.open_selected_thread(fi),
@@ -1295,7 +1444,11 @@ impl App {
     /// no other home), then the focus lands on the composer in the
     /// typing mode.
     fn summon_compose(&mut self, region: usize, new_thread: bool) {
-        let fi = region.min(self.regions.len().saturating_sub(1));
+        let fi = if region == TEMP_VIEW {
+            TEMP_VIEW
+        } else {
+            region.min(self.regions.len().saturating_sub(1))
+        };
         self.set_region_content(fi, ContentKind::Transcript);
         if new_thread {
             self.new_thread_intent = true;
@@ -1583,7 +1736,7 @@ impl App {
     /// Clamp one content's selection in EVERY region (the data the
     /// regions render changed wholesale; the view state follows).
     fn clamp_sels(&mut self, kind: ContentKind, n: usize) {
-        for vp in &mut self.regions {
+        for vp in self.regions.iter_mut().chain(self.temp.iter_mut()) {
             let list = match kind {
                 ContentKind::Threads => &mut vp.threads_sel,
                 ContentKind::Transcript => &mut vp.transcript_sel,
@@ -1598,7 +1751,7 @@ impl App {
     /// Every transcript-viewing region follows the newest row (an
     /// arrival is an attention event — the live tail is the point).
     fn follow_transcripts(&mut self, row: usize) {
-        for vp in &mut self.regions {
+        for vp in self.regions.iter_mut().chain(self.temp.iter_mut()) {
             if vp.content == ContentKind::Transcript {
                 vp.transcript_sel.select(Some(row));
             }
@@ -1763,5 +1916,52 @@ mod tests {
         ));
         assert!(!app.mode_menu);
         assert_eq!(app.regions[0].content, ContentKind::Authors);
+    }
+
+    #[test]
+    fn the_temp_window_opens_picks_and_pops() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.focus = Focus::Region(1);
+        app.regions[1].content = ContentKind::Mailboxes;
+        // x from region 1: the temp window opens straight into the
+        // picker, the origin remembered.
+        app.on_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.temp.is_some());
+        assert!(app.mode_menu);
+        assert!(app.temp_fresh);
+        assert!(matches!(app.focus, Focus::Temp));
+        assert_eq!(app.temp_origin, 1);
+        // Esc in the fresh picker: the window closes, no content.
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.temp.is_none());
+        assert!(!app.mode_menu);
+        assert!(matches!(app.focus, Focus::Region(1)));
+        // Reopen, pick 2 (transcript): content set, no longer fresh.
+        app.on_key(KeyEvent::from(KeyCode::Char('x')));
+        app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        assert!(!app.mode_menu);
+        assert!(!app.temp_fresh);
+        assert_eq!(
+            app.viewport(crate::app::TEMP_VIEW).content,
+            ContentKind::Transcript
+        );
+        // Esc pops back to the origin; the regions are untouched.
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.temp.is_none());
+        assert!(matches!(app.focus, Focus::Region(1)));
+        assert_eq!(app.regions[1].content, ContentKind::Mailboxes);
+    }
+
+    #[test]
+    fn p_is_retired_the_quick_profile_is_temp_plus_pick() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.on_key(KeyEvent::from(KeyCode::Char('p')));
+        // p does nothing: no temp window, no content swap.
+        assert!(app.temp.is_none());
+        assert!(!app.mode_menu);
+        assert_eq!(app.regions[0].content, ContentKind::Threads);
+        assert_eq!(app.regions[1].content, ContentKind::Transcript);
     }
 }

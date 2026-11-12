@@ -59,6 +59,9 @@ pub fn render(app: &mut App, f: &mut Frame) {
     render_region(app, f, 0, r0);
     render_region(app, f, 1, r1);
     render_keybar(f, keybar, &hint_lines, &version);
+    if app.temp.is_some() {
+        render_temp(app, f);
+    }
     if app.show_log {
         render_log_popup(app, f);
     }
@@ -80,6 +83,7 @@ fn render_region(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude:
     let mode_here = app.mode_menu
         && match app.focus {
             Focus::Region(f) => f == i,
+            Focus::Temp => false,
             Focus::Compose => false,
         };
     if mode_here {
@@ -102,6 +106,9 @@ fn region_border(app: &App, i: usize) -> Color {
     match app.focus {
         Focus::Region(f) if f == i => Color::Yellow,
         Focus::Compose if app.compose_host == i => Color::Green,
+        // The temp window's popup frame speaks the popup language
+        // (magenta — it is an overlay window, not a layout region).
+        Focus::Temp if i == crate::app::TEMP_VIEW => Color::Magenta,
         _ => Color::DarkGray,
     }
 }
@@ -112,12 +119,34 @@ fn rule(width: usize, label: &str) -> Span<'static> {
     Span::from(format!("{:-^width$}", label)).dark_gray()
 }
 
+/// The temp window: a modal overlay in the profile-popup pattern
+/// (centered, the popups stack over it). Its FIRST face is the
+/// modes picker (the principal — the quick profile is open-temp +
+/// pick); after a pick it hosts the chosen content with full
+/// dispatch parity (ruling 10). The title is unnumbered (ruling
+/// 9: numbers belong to the designed layout).
+fn render_temp(app: &mut App, f: &mut Frame) {
+    let area = centered(f.area(), 80, 60);
+    f.render_widget(Clear, area);
+    let fresh = app.temp_fresh;
+    if app.mode_menu || fresh {
+        render_modes(app, f, crate::app::TEMP_VIEW, area);
+        return;
+    }
+    match app.viewport(crate::app::TEMP_VIEW).content {
+        ContentKind::Threads => render_threads(app, f, crate::app::TEMP_VIEW, area),
+        ContentKind::Transcript => render_transcript(app, f, crate::app::TEMP_VIEW, area),
+        ContentKind::Authors => render_authors(app, f, crate::app::TEMP_VIEW, area),
+        ContentKind::Mailboxes => render_mailboxes(app, f, crate::app::TEMP_VIEW, area),
+    }
+}
+
 /// The `modes` content of the focused region: the region's own
 /// window IS the picker (its title reads `N modes`). j/k move the
 /// highlight, Enter opens it, 1-4 jump direct; the current
 /// content is marked — selecting it just closes.
 fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
-    let current = app.regions[i].content;
+    let current = app.viewport(i).content;
     let mut lines: Vec<Line> = vec![Line::from("")];
     for n in 0..4 {
         let kind = ContentKind::nth(n);
@@ -160,7 +189,11 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
     Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(format!(" {} modes ", i + 1))
+                .title(if i == crate::app::TEMP_VIEW {
+                    " modes ".to_owned()
+                } else {
+                    format!(" {} modes ", i + 1)
+                })
                 .border_style(region_border(app, i)),
         )
         .render(area, f.buffer_mut());
@@ -211,7 +244,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 55] = [
+    let rows: [(bool, &str, &str); 54] = [
         (false, "global", ""),
         (
             true,
@@ -225,7 +258,6 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         ),
         (true, "Tab", "cycle focus between the regions"),
         (true, "m", "open the mode: switch this region's content"),
-        (true, "p", "show the mailboxes here"),
         (true, "L", "core log popup (the core's stderr ring)"),
         (true, "q", "quit"),
         (false, "mode", ""),
@@ -485,7 +517,7 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
         &list_w,
         list_a,
         f.buffer_mut(),
-        &mut app.regions[i].mailboxes_sel,
+        &mut app.viewport_mut(i).mailboxes_sel,
     );
 
     if flow {
@@ -619,7 +651,7 @@ fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
         &list_w,
         list_a,
         f.buffer_mut(),
-        &mut app.regions[i].authors_sel,
+        &mut app.viewport_mut(i).authors_sel,
     );
     if flow {
         let prefix = "remark> ";
@@ -718,7 +750,7 @@ fn render_threads(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
         &list,
         area,
         f.buffer_mut(),
-        &mut app.regions[i].threads_sel,
+        &mut app.viewport_mut(i).threads_sel,
     );
 }
 
@@ -778,12 +810,12 @@ fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prel
     // The viewport height feeds the PgUp/PgDn page (the page is what
     // the terminal actually showed at the last paint) — per region,
     // the LOG rows only (the compose section is not paged).
-    app.regions[i].page_rows = log_a.height;
+    app.viewport_mut(i).page_rows = log_a.height;
     ratatui::widgets::StatefulWidget::render(
         &list,
         log_a,
         f.buffer_mut(),
-        &mut app.regions[i].transcript_sel,
+        &mut app.viewport_mut(i).transcript_sel,
     );
     if compose_here {
         render_compose_body(app, f, draft_a, staged_a);
@@ -938,7 +970,7 @@ fn keybar_hints(app: &App) -> &'static str {
     if app.focus == Focus::Compose {
         return "<Ctrl+Enter>/<Alt+Enter> send · <Ctrl+W> drop word · <Ctrl+U> clear · <Ctrl+V> paste · <Ctrl+C> copy · <Ctrl+R>/<Ctrl+S> file · Esc standby";
     }
-    match app.regions[app.focus_region()].content {
+    match app.viewport(app.focus_region()).content {
         ContentKind::Threads => {
             "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter open · j/k move · m mode · L log · ? help · q quit"
         }

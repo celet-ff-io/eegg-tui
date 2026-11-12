@@ -148,8 +148,8 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
     let back = current.title();
     let rows = [
         ("m", back, Style::new().dark_gray()),
-        ("q", "quit", Style::new().dark_gray()),
         ("Esc", back, Style::new().dark_gray().italic()),
+        ("q", "quit", Style::new().dark_gray()),
     ];
     for (key, target, style) in rows {
         lines.push(Line::from(vec![

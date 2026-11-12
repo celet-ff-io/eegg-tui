@@ -138,18 +138,21 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
         let title = if sel { title.bold() } else { title.cyan() };
         lines.push(Line::from(vec![num, title]));
     }
-    // The back entries: m and Esc read as keys that switch to a
-    // specified mode — <back>, the page the region showed before
-    // the modes list. They sit at the list's bottom and are NOT
-    // selectable (j/k stops at the four kinds).
-    let orange = Color::Indexed(208);
+    lines.push(Line::from(""));
+    // The back entries: m and Esc switch BACK to the page the
+    // region showed before the modes list (its current content —
+    // the <back> the principal hinted). Styled like the plain
+    // list rows, the keys right-aligned with the 1-4 numbers,
+    // set off by one blank line — the blank line is what says
+    // j/k stops above them.
+    let back = current.title();
     for (key, style) in [
-        ("m", Style::new().fg(orange).bold()),
-        ("Esc", Style::new().fg(orange).bold().italic()),
+        ("m", Style::new().dark_gray()),
+        ("Esc", Style::new().dark_gray().italic()),
     ] {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {key:<3}"), style),
-            Span::from("<back>").dark_gray(),
+            Span::styled(format!(" {:>3} ", key), style),
+            Span::from(back).cyan(),
         ]));
     }
     Paragraph::new(lines)
@@ -926,7 +929,7 @@ fn render_compose_body(
 fn keybar_hints(app: &App) -> &'static str {
     // The mode is a modal: its own one-line hint.
     if app.mode_menu {
-        return "j/k select · Enter open · 1-4 direct";
+        return "j/k select · Enter open · 1-4 direct · j/k won't reach the back entries";
     }
     // Typing: the editor face. (Standby shows the focused content's
     // face below — standby IS the default state.)

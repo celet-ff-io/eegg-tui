@@ -189,6 +189,15 @@ pub struct App {
     /// Set by the new-thread key: the next send starts a FRESH chain
     /// even though a thread transcript is open.
     pub new_thread_intent: bool,
+    /// The new-thread row is armed: the threads list shows a
+    /// synthetic "new thread" entry (no id yet) and the transcript
+    /// windows track the fresh thread. It lands on the first sent
+    /// message's commit receipt; moving the threads selection to a
+    /// normal thread tears it down (n re-arms).
+    pub new_thread_row: bool,
+    /// The thread the transcript had open when the new-thread state
+    /// armed (the teardown restores it — a fresh log fetch).
+    pub pre_new_thread: Option<MsgRef>,
     /// The working draft (from msg_draft_push).
     pub staged: Option<(Option<Value>, Vec<Value>)>,
     /// The send-target set (the whole resting set, replaced on every
@@ -359,6 +368,8 @@ impl App {
             show_compose: false,
             cursor: Vec::new(),
             new_thread_intent: false,
+            new_thread_row: false,
+            pre_new_thread: None,
             staged: None,
             peers: Vec::new(),
             self_card: None,
@@ -580,7 +591,7 @@ impl App {
         let fi = self.focus_region();
         let kind = self.viewport(fi).content;
         let len = match kind {
-            ContentKind::Threads => self.threads.len(),
+            ContentKind::Threads => self.threads.len() + usize::from(self.new_thread_row),
             ContentKind::Transcript => self.entries.len(),
             ContentKind::Authors => self.authors.len(),
             ContentKind::Mailboxes => self.peers.len() + 1,
@@ -594,13 +605,35 @@ impl App {
         };
         let next = (i as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
         list.select(Some(next));
+        self.new_thread_row_guard();
+    }
+
+    /// The new-thread row is armed: any threads selection that
+    /// LEAVES it (any row but the top) tears the state down — the
+    /// row vanishes and the transcript returns to the pre-n thread.
+    fn new_thread_row_guard(&mut self) {
+        if !self.new_thread_row {
+            return;
+        }
+        let fi = self.focus_region();
+        if self.viewport(fi).content != ContentKind::Threads {
+            return;
+        }
+        if self
+            .viewport(fi)
+            .threads_sel
+            .selected()
+            .is_some_and(|i| i > 0)
+        {
+            self.cancel_new_thread();
+        }
     }
 
     /// The active list's length (for g/G jump-to-end).
     fn sel_len(&self) -> usize {
         let fi = self.focus_region();
         match self.viewport(fi).content {
-            ContentKind::Threads => self.threads.len(),
+            ContentKind::Threads => self.threads.len() + usize::from(self.new_thread_row),
             ContentKind::Transcript => self.entries.len(),
             ContentKind::Authors => self.authors.len(),
             ContentKind::Mailboxes => self.peers.len() + 1,
@@ -623,6 +656,7 @@ impl App {
         self.viewport_mut(fi)
             .sel_mut()
             .select(if n > 0 { Some(n - 1) } else { None });
+        self.new_thread_row_guard();
     }
 
     /// Switch a view's content (the mode's 1..4, opening a
@@ -669,29 +703,136 @@ impl App {
     /// Enter on a threads region: fetch the selected thread's log
     /// (reads are cursor-independent — browsing never moves the
     /// anchor) and turn the region into its transcript.
-    fn open_selected_thread(&mut self, region: usize) {
-        let fi = if region == TEMP_VIEW {
-            TEMP_VIEW
-        } else {
-            region.min(self.regions.len().saturating_sub(1))
-        };
-        let thread = self
-            .viewport(fi)
-            .threads_sel
-            .selected()
-            .and_then(|i| self.threads.get(i).cloned());
-        if let Some(t) = thread {
-            self.entries.clear();
-            self.locals.clear();
-            self.open_thread = Some(t.clone());
+    /// n: the new-thread state. The threads list gains a synthetic
+    /// "new thread" row (no id yet — styled apart) at the TOP and
+    /// the selection lands on it; the transcript windows track the
+    /// fresh (empty) thread; the composer stands by in the first
+    /// transcript window WITHOUT taking focus. The first sent
+    /// message's commit receipt lands the thread (the row
+    /// vanishes); moving the selection to a normal thread tears the
+    /// state down (n re-arms). Entered from inside a transcript
+    /// (n there), the composer goes straight to typing.
+    fn begin_new_thread(&mut self, from_transcript: bool) {
+        if from_transcript {
+            let fi = self.focus_region();
+            self.show_compose = true;
+            self.compose_host = fi;
+            self.focus = Focus::Compose;
+        }
+        if self.new_thread_row {
+            return; // idempotent; the typing entry already handled
+        }
+        self.pre_new_thread = self.open_thread.clone();
+        self.new_thread_row = true;
+        self.new_thread_intent = true;
+        // The transcript windows track the fresh thread: empty.
+        self.entries.clear();
+        self.locals.clear();
+        self.open_thread = None;
+        self.follow_transcripts(0);
+        // Every threads view snaps onto the synthetic row.
+        for vp in self.regions.iter_mut().chain(self.temp.iter_mut()) {
+            if vp.content == ContentKind::Threads {
+                vp.threads_sel.select(Some(0));
+            }
+        }
+        // Standby composer in the first transcript window (regions
+        // first, then the temp window) — no focus move.
+        if !from_transcript {
+            let host = (0..self.regions.len())
+                .find(|&r| self.regions[r].content == ContentKind::Transcript)
+                .or_else(|| {
+                    (self
+                        .temp
+                        .as_ref()
+                        .is_some_and(|vp| vp.content == ContentKind::Transcript))
+                    .then_some(TEMP_VIEW)
+                });
+            if let Some(h) = host {
+                self.show_compose = true;
+                self.compose_host = h;
+            }
+        }
+        self.flash = Some("new thread".into());
+    }
+
+    /// The new-thread state tears down (the selection moved to a
+    /// normal thread): the row vanishes, the wire intent clears,
+    /// the standby composer hides, and the transcript returns to
+    /// the pre-n thread (a fresh log fetch when there was one).
+    fn cancel_new_thread(&mut self) {
+        if !self.new_thread_row {
+            return;
+        }
+        self.new_thread_row = false;
+        self.new_thread_intent = false;
+        self.show_compose = false;
+        self.entries.clear();
+        self.locals.clear();
+        self.open_thread = self.pre_new_thread.take();
+        if let Some(t) = self.open_thread.clone() {
             self.outbox.push(IncomingFrame {
                 method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
-                    thread: Some(t.clone()),
+                    thread: Some(t),
                 })),
             });
-            self.set_region_content(fi, ContentKind::Transcript);
-            self.viewport_mut(fi).transcript_sel.select(Some(0));
         }
+        self.follow_transcripts(0);
+        self.flash = Some("new thread dropped".into());
+    }
+
+    /// Enter in the threads content: the selected thread shows in
+    /// the OTHER transcript windows (the threads window itself
+    /// never flips its content — the old hijack is retired); with
+    /// no transcript window anywhere, Enter does nothing. No focus
+    /// move (a preview key).
+    fn enter_from_threads(&mut self) {
+        let any_transcript = self
+            .regions
+            .iter()
+            .any(|r| r.content == ContentKind::Transcript)
+            || self
+                .temp
+                .as_ref()
+                .is_some_and(|vp| vp.content == ContentKind::Transcript);
+        if !any_transcript {
+            return;
+        }
+        // The synthetic row: the tracking is already active.
+        let Some(Some(thread)) = self.selected_thread() else {
+            return;
+        };
+        let was_armed = self.new_thread_row;
+        self.entries.clear();
+        self.locals.clear();
+        self.open_thread = Some(thread);
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
+                thread: self.open_thread.clone(),
+            })),
+        });
+        self.follow_transcripts(0);
+        // Adopting a normal thread tears the new-thread state down.
+        if was_armed {
+            self.new_thread_row = false;
+            self.new_thread_intent = false;
+            self.show_compose = false;
+            self.pre_new_thread = None;
+        }
+    }
+
+    /// The threads selection resolved against the synthetic row:
+    /// None = no selection; Some(None) = the new-thread row;
+    /// Some(Some(t)) = a real thread.
+    fn selected_thread(&self) -> Option<Option<MsgRef>> {
+        let i = self.viewport(self.focus_region()).threads_sel.selected()?;
+        if self.new_thread_row && i == 0 {
+            return Some(None);
+        }
+        self.threads
+            .get(i - usize::from(self.new_thread_row))
+            .cloned()
+            .map(Some)
     }
 
     /// The selected author's anchor (BTreeMap order = anchor order).
@@ -1456,15 +1597,13 @@ impl App {
         match self.viewport(fi).content {
             ContentKind::Threads => match key.code {
                 KeyCode::Char('t') => self.refresh_threads(),
-                // New thread from the threads list too: the composer
-                // summons into this view's transcript (the keybar
-                // hint promises n here — the binding was
-                // transcript-only and the principal hit the gap).
-                KeyCode::Char('n') => {
-                    self.summon_compose(fi, true);
-                    self.flash = Some("new thread".into());
-                }
-                KeyCode::Enter => self.open_selected_thread(fi),
+                // The new-thread state: the row arms, the
+                // transcript windows track, the composer stands by —
+                // no focus move, no window hijack.
+                KeyCode::Char('n') => self.begin_new_thread(false),
+                // Preview: the OTHER transcript windows switch to
+                // the selected thread; with none, nothing happens.
+                KeyCode::Enter => self.enter_from_threads(),
                 _ => {}
             },
             ContentKind::Transcript => match key.code {
@@ -1476,17 +1615,14 @@ impl App {
                     self.file_box = FileBox::SaveTranscript;
                 }
                 KeyCode::Char('r') => self.refresh_draft(),
-                // New-thread compose: the next send starts a fresh
-                // chain even though a thread transcript is open.
-                KeyCode::Char('n') => {
-                    self.summon_compose(fi, true);
-                    self.flash = Some("new thread".into());
-                }
+                // The same new-thread state, entered from inside a
+                // transcript: the composer goes straight to typing.
+                KeyCode::Char('n') => self.begin_new_thread(true),
                 // Summon the composer (leaving it was Esc — symmetric
                 // entry; typing starts immediately). The composer is
                 // the transcript's sub-window: other contents have
                 // no compose.
-                KeyCode::Char('i') => self.summon_compose(fi, false),
+                KeyCode::Char('i') => self.summon_compose(fi),
                 _ => {}
             },
             ContentKind::Authors => match key.code {
@@ -1537,16 +1673,13 @@ impl App {
     /// becomes the transcript if it is not already (the composer has
     /// no other home), then the focus lands on the composer in the
     /// typing mode.
-    fn summon_compose(&mut self, region: usize, new_thread: bool) {
+    fn summon_compose(&mut self, region: usize) {
         let fi = if region == TEMP_VIEW {
             TEMP_VIEW
         } else {
             region.min(self.regions.len().saturating_sub(1))
         };
         self.set_region_content(fi, ContentKind::Transcript);
-        if new_thread {
-            self.new_thread_intent = true;
-        }
         self.show_compose = true;
         self.compose_host = fi;
         self.focus = Focus::Compose;
@@ -1594,7 +1727,10 @@ impl App {
             Some(Out::MsgDraftPush(d)) => self.staged = Some((d.content, d.claims)),
             Some(Out::MsgThreadsPush(p)) => {
                 self.threads = p.threads.into_iter().filter_map(|t| t.thread).collect();
-                self.clamp_sels(ContentKind::Threads, self.threads.len());
+                self.clamp_sels(
+                    ContentKind::Threads,
+                    self.threads.len() + usize::from(self.new_thread_row),
+                );
             }
             Some(Out::MsgThreadsLogPush(p)) => {
                 // The log answer: one package per message, transcript
@@ -1784,13 +1920,19 @@ impl App {
                 self.entries.push(e);
                 let n = self.entries.len();
                 self.follow_transcripts(n - 1);
-            } else if self.open_thread.is_none() {
+            } else if self.open_thread.is_none() && (!self.new_thread_row || receipt) {
                 // Nothing open: show the row and adopt its thread (a
                 // fresh commit's first prev IS the thread id — the
-                // genesis parent ref).
+                // genesis parent ref). A foreign arrival never
+                // hijacks the armed new-thread tracking; OUR commit
+                // receipt does — the row's promise lands here.
                 self.entries = vec![e.clone()];
                 self.open_thread = e.prev.first().cloned();
                 self.follow_transcripts(0);
+                if self.new_thread_row {
+                    self.new_thread_row = false;
+                    self.pre_new_thread = None;
+                }
             }
             self.refresh_threads();
             self.flash = Some("msg arrived".into());
@@ -1964,7 +2106,7 @@ mod tests {
     fn switching_the_host_region_away_collapses_the_composer() {
         let mut app = App::new();
         // Region 2 (index 1) holds the transcript by default.
-        app.summon_compose(1, false);
+        app.summon_compose(1);
         assert_eq!(app.focus, Focus::Compose);
         assert!(app.show_compose);
         app.set_region_content(1, ContentKind::Mailboxes);
@@ -1991,8 +2133,10 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_thread_turns_the_region_into_its_transcript() {
+    fn threads_enter_shows_the_selected_thread_in_transcript_windows() {
         let mut app = App::new();
+        app.set_region_content(0, ContentKind::Threads);
+        app.set_region_content(1, ContentKind::Transcript);
         app.threads = vec![MsgRef {
             ver_major: 1,
             ver_minor: 0,
@@ -2000,14 +2144,43 @@ mod tests {
             digest: vec![1, 2, 3],
         }];
         app.regions[0].threads_sel.select(Some(0));
-        app.open_selected_thread(0);
-        assert_eq!(app.regions[0].content, ContentKind::Transcript);
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Enter,
+        ));
+        // The threads window never flips its content (the old
+        // hijack is retired); the transcript window adopts.
+        assert_eq!(app.regions[0].content, ContentKind::Threads);
+        assert_eq!(app.focus, Focus::Region(0));
+        assert!(app.open_thread.is_some());
         assert!(
             app.outbox
                 .iter()
                 .any(|f| matches!(f.method, Some(Method::MsgThreadsLogGet(_))))
         );
-        assert!(app.open_thread.is_some());
+    }
+
+    #[test]
+    fn threads_enter_without_transcript_window_does_nothing() {
+        let mut app = App::new();
+        // Region 2 (index 1) defaults to the transcript — park it on
+        // threads too, so NO window shows a transcript.
+        app.set_region_content(1, ContentKind::Threads);
+        app.threads = vec![MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: "ed25519".into(),
+            digest: vec![1, 2, 3],
+        }];
+        app.regions[0].threads_sel.select(Some(0));
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Enter,
+        ));
+        assert!(app.open_thread.is_none());
+        assert!(
+            app.outbox
+                .iter()
+                .all(|f| !matches!(f.method, Some(Method::MsgThreadsLogGet(_))))
+        );
     }
 
     #[test]
@@ -2090,17 +2263,125 @@ mod tests {
     }
 
     #[test]
-    fn n_new_thread_works_from_the_threads_list() {
+    fn n_arms_the_new_thread_row_without_hijacking() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent};
         let mut app = App::new();
-        // The threads list (region 0's default content): n summons
-        // the composer with the fresh-chain intent — the keybar
-        // hint promised this; the binding used to be transcript-only.
+        app.set_region_content(0, ContentKind::Threads);
+        app.set_region_content(1, ContentKind::Transcript);
+        // Two real threads: j off the synthetic row must land on a
+        // NORMAL thread (the list holds row + both).
+        app.threads = vec![
+            MsgRef {
+                ver_major: 1,
+                ver_minor: 0,
+                algo: "ed25519".into(),
+                digest: vec![1, 1, 1],
+            },
+            MsgRef {
+                ver_major: 1,
+                ver_minor: 0,
+                algo: "ed25519".into(),
+                digest: vec![2, 2, 2],
+            },
+        ];
+        app.open_thread = Some(MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: "ed25519".into(),
+            digest: vec![5, 5, 5],
+        });
         app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(app.new_thread_row && app.new_thread_intent);
+        // No window hijack, no focus move.
+        assert_eq!(app.regions[0].content, ContentKind::Threads);
+        assert_eq!(app.focus, Focus::Region(0));
+        // The transcript windows track the fresh thread; the
+        // composer stands by, unfocused.
+        assert!(app.open_thread.is_none() && app.entries.is_empty());
+        assert!(app.show_compose && app.compose_host == 1);
+        // j off the row tears the state down and restores.
+        app.on_key(KeyEvent::from(KeyCode::Char('j')));
+        assert!(!app.new_thread_row && !app.new_thread_intent);
+        assert!(!app.show_compose);
+        assert!(
+            app.open_thread
+                .as_ref()
+                .is_some_and(|t| t.digest == vec![5, 5, 5])
+        );
+        assert!(app.outbox.iter().any(|f| matches!(
+            &f.method,
+            Some(Method::MsgThreadsLogGet(g)) if g.thread.as_ref().is_some_and(|t| t.digest == vec![5, 5, 5])
+        )));
+    }
+
+    #[test]
+    fn a_foreign_arrival_never_hijacks_the_armed_new_thread() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.set_region_content(1, ContentKind::Transcript);
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(app.new_thread_row);
+        // A foreign arrival (not our receipt) must not adopt.
+        app.ingest_package(MsgPackage {
+            entry: Some(Entry {
+                meta: Some(zconned_stdio_types::RowMeta {
+                    digest: vec![7u8; 32],
+                    from: vec![9u8; 32],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(app.new_thread_row && app.open_thread.is_none() && app.entries.is_empty());
+        // OUR commit receipt lands the thread (the row's promise).
+        app.awaiting_commit = true;
+        app.ingest_package(MsgPackage {
+            entry: Some(Entry {
+                prev: vec![MsgRef {
+                    ver_major: 1,
+                    ver_minor: 0,
+                    algo: "ed25519".into(),
+                    digest: vec![3u8; 32],
+                }],
+                meta: Some(zconned_stdio_types::RowMeta {
+                    digest: vec![8u8; 32],
+                    from: vec![9u8; 32],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(!app.new_thread_row);
+        assert!(
+            app.open_thread
+                .as_ref()
+                .is_some_and(|t| t.digest == vec![3u8; 32])
+        );
+        assert_eq!(app.entries.len(), 1);
+    }
+
+    #[test]
+    fn n_in_the_transcript_tracks_and_types_at_once() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        // The transcript content: n enters the same new-thread
+        // state, with the composer going straight to typing.
+        app.set_region_content(0, ContentKind::Transcript);
+        app.focus = Focus::Region(0);
+        app.open_thread = Some(MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: "ed25519".into(),
+            digest: vec![5, 5, 5],
+        });
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(app.new_thread_row && app.new_thread_intent);
         assert!(app.show_compose);
-        assert!(app.new_thread_intent);
-        assert_eq!(app.regions[0].content, ContentKind::Transcript);
         assert!(matches!(app.focus, Focus::Compose));
+        // The transcript tracks the fresh thread, not the old one.
+        assert!(app.open_thread.is_none() && app.entries.is_empty());
     }
 
     #[test]

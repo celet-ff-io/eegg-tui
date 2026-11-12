@@ -1023,7 +1023,7 @@ fn keybar_hints(app: &App) -> &'static str {
     }
     match app.viewport(app.focus_region()).content {
         ContentKind::Threads => {
-            "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter open · j/k move · m mode · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter show in transcript windows · j/k move · m mode · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
             "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m mode · L log · ? help · q quit"

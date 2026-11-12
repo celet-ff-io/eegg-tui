@@ -14,8 +14,8 @@ use zconned_material::{CLAIM_KIND_TS, MsgRef, Value};
 use zconned_stdio_types::{
     Entry, Error as FrameError, Fresh, IdentitiesGet, IdentityRemarkReset, IdentityRemarkSet,
     IncomingFrame, MsgCursorSet, MsgDraftCommit, MsgDraftContentSet, MsgDraftGet, MsgPackage,
-    MsgThreadsGet, MsgThreadsLogGet, Peer, PeerSet, PeersGet, SelfGet, incoming_frame::Method,
-    outgoing_frame::Frame as Out,
+    MsgThreadDelete, MsgThreadLogGet, MsgThreadsGet, Peer, PeerSet, PeersGet, SelfGet,
+    incoming_frame::Method, outgoing_frame::Frame as Out,
 };
 
 use crate::clipboard;
@@ -795,9 +795,7 @@ impl App {
         self.open_thread = self.pre_new_thread.take();
         if let Some(t) = self.open_thread.clone() {
             self.outbox.push(IncomingFrame {
-                method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
-                    thread: Some(t),
-                })),
+                method: Some(Method::MsgThreadLogGet(MsgThreadLogGet { thread: Some(t) })),
             });
         }
         self.follow_transcripts(0);
@@ -830,7 +828,7 @@ impl App {
         self.locals.clear();
         self.open_thread = Some(thread);
         self.outbox.push(IncomingFrame {
-            method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
+            method: Some(Method::MsgThreadLogGet(MsgThreadLogGet {
                 thread: self.open_thread.clone(),
             })),
         });
@@ -842,6 +840,25 @@ impl App {
             self.show_compose = false;
             self.pre_new_thread = None;
         }
+    }
+
+    /// d in the threads content: delete the SELECTED thread (B8 —
+    /// a point op, LOCAL store curation; counterparts keep their
+    /// copies). The synthetic new-thread row has nothing to delete
+    /// (a no-op). The receipt is the wholesale threads push, which
+    /// re-renders the list and drops an open deleted thread's
+    /// transcript view (an arriving mail re-grows the thread —
+    /// expect resurrection; a mute is a future feature).
+    fn delete_selected_thread(&mut self) {
+        let Some(Some(thread)) = self.selected_thread() else {
+            return; // no selection, or the synthetic row
+        };
+        self.outbox.push(IncomingFrame {
+            method: Some(Method::MsgThreadDelete(MsgThreadDelete {
+                thread: Some(thread),
+            })),
+        });
+        self.flash = Some("deleting thread".into());
     }
 
     /// The threads selection resolved against the synthetic row:
@@ -1631,6 +1648,9 @@ impl App {
                 // Preview: the OTHER transcript windows switch to
                 // the selected thread; with none, nothing happens.
                 KeyCode::Enter => self.enter_from_threads(),
+                // Delete the selected thread (B8, local store
+                // curation): the receipt is the threads push.
+                KeyCode::Char('d') => self.delete_selected_thread(),
                 _ => {}
             },
             ContentKind::Transcript => match key.code {
@@ -1778,8 +1798,23 @@ impl App {
                     ContentKind::Threads,
                     self.threads.len() + usize::from(self.new_thread_row),
                 );
+                // B8's receipt doubles as the delete echo: if the
+                // OPEN thread is gone from the surviving list, its
+                // transcript view drops to empty (the store's truth;
+                // an arriving mail re-grows the thread and the
+                // adoption path handles it).
+                if self
+                    .open_thread
+                    .as_ref()
+                    .is_some_and(|t| !self.threads.contains(t))
+                {
+                    self.entries.clear();
+                    self.locals.clear();
+                    self.open_thread = None;
+                    self.follow_transcripts(0);
+                }
             }
-            Some(Out::MsgThreadsLogPush(p)) => {
+            Some(Out::MsgThreadLogPush(p)) => {
                 // The log answer: one package per message, transcript
                 // order. The rows AND their overlays are replaced
                 // WHOLESALE (the answer states the full thread state);
@@ -1883,7 +1918,7 @@ impl App {
                     self.awaiting_remark_receipt = false;
                     if let Some(t) = self.open_thread.clone() {
                         self.outbox.push(IncomingFrame {
-                            method: Some(Method::MsgThreadsLogGet(MsgThreadsLogGet {
+                            method: Some(Method::MsgThreadLogGet(MsgThreadLogGet {
                                 thread: Some(t),
                             })),
                         });
@@ -2245,7 +2280,7 @@ mod tests {
         assert!(
             app.outbox
                 .iter()
-                .any(|f| matches!(f.method, Some(Method::MsgThreadsLogGet(_))))
+                .any(|f| matches!(f.method, Some(Method::MsgThreadLogGet(_))))
         );
     }
 
@@ -2269,7 +2304,7 @@ mod tests {
         assert!(
             app.outbox
                 .iter()
-                .all(|f| !matches!(f.method, Some(Method::MsgThreadsLogGet(_))))
+                .all(|f| !matches!(f.method, Some(Method::MsgThreadLogGet(_))))
         );
     }
 
@@ -2400,7 +2435,7 @@ mod tests {
         );
         assert!(app.outbox.iter().any(|f| matches!(
             &f.method,
-            Some(Method::MsgThreadsLogGet(g)) if g.thread.as_ref().is_some_and(|t| t.digest == vec![5, 5, 5])
+            Some(Method::MsgThreadLogGet(g)) if g.thread.as_ref().is_some_and(|t| t.digest == vec![5, 5, 5])
         )));
     }
 
@@ -2500,6 +2535,76 @@ mod tests {
         );
         assert_eq!(wrap_width("abcdefgh", 3), vec!["abc", "def", "gh"]);
         assert_eq!(wrap_width("", 10), vec![""]);
+    }
+
+    #[test]
+    fn d_deletes_the_selected_thread_and_the_receipt_drops_its_view() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.set_region_content(0, ContentKind::Threads);
+        app.focus = Focus::Region(0);
+        let t1 = MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: "ed25519".into(),
+            digest: vec![1, 1, 1],
+        };
+        let t2 = MsgRef {
+            ver_major: 1,
+            ver_minor: 0,
+            algo: "ed25519".into(),
+            digest: vec![2, 2, 2],
+        };
+        app.threads = vec![t1.clone(), t2.clone()];
+        app.regions[0].threads_sel.select(Some(0));
+        app.open_thread = Some(t1.clone());
+        app.entries = vec![Entry::default()];
+        app.on_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.outbox.iter().any(|f| matches!(
+            &f.method,
+            Some(Method::MsgThreadDelete(del)) if del.thread.as_ref() == Some(&t1)
+        )));
+        // The receipt: the surviving list only — the open deleted
+        // thread's transcript view drops to empty.
+        app.on_frame(zconned_stdio_types::OutgoingFrame {
+            frame: Some(Out::MsgThreadsPush(zconned_stdio_types::MsgThreadsPush {
+                threads: vec![zconned_stdio_types::ThreadEntry {
+                    thread: Some(t2.clone()),
+                }],
+            })),
+        });
+        assert_eq!(app.threads, vec![t2.clone()]);
+        assert!(app.open_thread.is_none() && app.entries.is_empty());
+        // Resurrection (a re-grown thread re-appears): the list
+        // re-renders; nothing else breaks.
+        app.on_frame(zconned_stdio_types::OutgoingFrame {
+            frame: Some(Out::MsgThreadsPush(zconned_stdio_types::MsgThreadsPush {
+                threads: vec![
+                    zconned_stdio_types::ThreadEntry {
+                        thread: Some(t1.clone()),
+                    },
+                    zconned_stdio_types::ThreadEntry { thread: Some(t2) },
+                ],
+            })),
+        });
+        assert_eq!(app.threads.len(), 2);
+    }
+
+    #[test]
+    fn d_on_the_synthetic_new_thread_row_is_a_noop() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.set_region_content(0, ContentKind::Threads);
+        app.focus = Focus::Region(0);
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(app.new_thread_row);
+        app.outbox.clear();
+        app.on_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(
+            app.outbox
+                .iter()
+                .all(|f| !matches!(f.method, Some(Method::MsgThreadDelete(_))))
+        );
     }
 
     #[test]

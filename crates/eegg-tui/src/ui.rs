@@ -285,7 +285,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 59] = [
+    let rows: [(bool, &str, &str); 60] = [
         (false, "global", ""),
         (
             true,
@@ -321,6 +321,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "Enter",
             "show the selected thread in the transcript windows",
         ),
+        (true, "d", "delete the selected thread (local copy only)"),
         (true, "j/k \u{2191}\u{2193}", "move the selection"),
         (true, "g/G", "jump to the top / the bottom"),
         (false, "transcript", ""),
@@ -1087,7 +1088,7 @@ fn keybar_hints(app: &App) -> &'static str {
     }
     match app.viewport(app.focus_region()).content {
         ContentKind::Threads => {
-            "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter show in transcript windows · j/k move · m mode · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter show in transcript windows · d delete · j/k move · m mode · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
             "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · f author fp · t ts · T fp · m mode · L log · ? help · q quit"

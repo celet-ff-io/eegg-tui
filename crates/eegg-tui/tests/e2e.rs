@@ -289,8 +289,8 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
     });
     println!("e2e: identities_get answers the derived anchor set");
 
-    b.send(Method::MsgThreadsLogGet(
-        zconned_stdio_types::MsgThreadsLogGet {
+    b.send(Method::MsgThreadLogGet(
+        zconned_stdio_types::MsgThreadLogGet {
             thread: Some(thread_ref),
         },
     ));
@@ -298,7 +298,7 @@ fn two_cores_one_relay_commit_arrives_and_receipt_returns() {
         "the log re-fetch with the remark",
         Duration::from_secs(10),
         |f| {
-            matches!(f, Out::MsgThreadsLogPush(p)
+            matches!(f, Out::MsgThreadLogPush(p)
             if p.packages.iter().any(|pkg| {
                 pkg.local.as_ref().is_some_and(|l| {
                     l.remark.as_deref() == Some("the counterpart")

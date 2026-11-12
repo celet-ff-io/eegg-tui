@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "eegg-tui"
-version = "0.1.0-alpha.25"
+version = "0.1.0-alpha.26"
 dependencies = [
  "arboard",
  "base64",

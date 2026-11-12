@@ -59,10 +59,6 @@ pub fn render(app: &mut App, f: &mut Frame) {
     render_region(app, f, 0, r0);
     render_region(app, f, 1, r1);
     render_keybar(f, keybar, &hint_lines, &version);
-    if app.mode_menu {
-        render_mode_menu(app, f);
-        return;
-    }
     if app.show_log {
         render_log_popup(app, f);
     }
@@ -78,6 +74,18 @@ pub fn render(app: &mut App, f: &mut Frame) {
 /// region hosts an open one) renders INSIDE the transcript frame —
 /// a rule, the draft rows, the staged line; no second frame.
 fn render_region(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
+    // The mode: the FOCUSED region's own window switches to the
+    // "modes" content — its title reads `N modes` and its body is
+    // the picker (the principal: `1 threads` + m = `1 modes`).
+    let mode_here = app.mode_menu
+        && match app.focus {
+            Focus::Region(f) => f == i,
+            Focus::Compose => false,
+        };
+    if mode_here {
+        render_modes(app, f, i, area);
+        return;
+    }
     match app.regions[i].content {
         ContentKind::Threads => render_threads(app, f, i, area),
         ContentKind::Transcript => render_transcript(app, f, i, area),
@@ -104,17 +112,12 @@ fn rule(width: usize, label: &str) -> Span<'static> {
     Span::from(format!("{:-^width$}", label)).dark_gray()
 }
 
-/// The mode: entering it turns the WHOLE window into the
-/// selection surface (the principal — not a small popup over the
-/// focused region). j/k move the highlight, Enter opens it,
-/// 1-4 jump direct; the current content is marked — selecting
-/// it just closes.
-fn render_mode_menu(app: &App, f: &mut Frame) {
-    let focused = match app.focus {
-        Focus::Region(i) => i.min(app.regions.len() - 1),
-        Focus::Compose => app.compose_host.min(app.regions.len() - 1),
-    };
-    let current = app.regions[focused].content;
+/// The `modes` content of the focused region: the region's own
+/// window IS the picker (its title reads `N modes`). j/k move the
+/// highlight, Enter opens it, 1-4 jump direct; the current
+/// content is marked — selecting it just closes.
+fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
+    let current = app.regions[i].content;
     let mut lines: Vec<Line> = vec![Line::from("")];
     for n in 0..4 {
         let kind = ContentKind::nth(n);
@@ -139,13 +142,11 @@ fn render_mode_menu(app: &App, f: &mut Frame) {
     lines.push(Line::from(
         Span::from("  j/k select · Enter open · 1-4 direct · Esc/m close").dark_gray(),
     ));
-    let area = f.area();
-    f.render_widget(Clear, area);
     Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(format!(" mode \u{2014} region {}'s content ", focused + 1))
-                .border_style(Color::Magenta),
+                .title(format!(" {} modes ", i + 1))
+                .border_style(region_border(app, i)),
         )
         .render(area, f.buffer_mut());
 }

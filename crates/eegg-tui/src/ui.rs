@@ -146,13 +146,15 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
     // set off by one blank line — the blank line is what says
     // j/k stops above them.
     let back = current.title();
-    for (key, style) in [
-        ("m", Style::new().dark_gray()),
-        ("Esc", Style::new().dark_gray().italic()),
-    ] {
+    let rows = [
+        ("m", back, Style::new().dark_gray()),
+        ("q", "quit", Style::new().dark_gray()),
+        ("Esc", back, Style::new().dark_gray().italic()),
+    ];
+    for (key, target, style) in rows {
         lines.push(Line::from(vec![
             Span::styled(format!(" {:>3} ", key), style),
-            Span::from(back).cyan(),
+            Span::from(target).cyan(),
         ]));
     }
     Paragraph::new(lines)

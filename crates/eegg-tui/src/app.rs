@@ -1093,8 +1093,8 @@ impl App {
 
         // The mode: the WHOLE window is the selection surface —
         // j/k move the highlight, Enter opens it, 1..4 jump
-        // direct, Esc/m closes without change, the rest is
-        // ignored (q is NOT bound: q means quit, everywhere).
+        // direct, Esc/m goes back without change, q quits (its
+        // global meaning, listed in the modes frame too).
         if self.mode_menu {
             match key.code {
                 KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
@@ -1109,6 +1109,7 @@ impl App {
                     self.set_region_content(self.focus_region(), ContentKind::nth(self.mode_sel));
                 }
                 KeyCode::Esc | KeyCode::Char('m') => self.mode_menu = false,
+                KeyCode::Char('q') => self.quit = true,
                 _ => {}
             }
             return;

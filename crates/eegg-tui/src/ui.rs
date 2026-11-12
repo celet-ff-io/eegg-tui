@@ -9,17 +9,18 @@ use miette::IntoDiagnostic as _;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
+    buffer::Buffer,
     crossterm::{
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
-    buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style, Stylize as _},
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, Paragraph, Widget as _},
 };
 
+use zconned_material::CLAIM_KIND_TS;
 use crate::app::{
     App, CardFlow, ContentKind, Focus, anchor_of, digest_preview, fp_short, full_text,
     preview_bytes, wrap_width,
@@ -1005,6 +1006,35 @@ fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prel
     }
 }
 
+/// The claims tail: the timestamp claim carries the SEND time
+/// (the core stamps an RFC3339 UTC string) — the reader's local
+/// wall time, never the raw UTC form; the other claims keep their
+/// kind label; a malformed ts value falls back to the kind.
+fn claims_label(claims: &[zconned_stdio_types::ResolvedClaim]) -> String {
+    claims
+        .iter()
+        .map(|c| {
+            if c.kind == CLAIM_KIND_TS {
+                c.value
+                    .as_ref()
+                    .and_then(|v| std::str::from_utf8(&v.data).ok())
+                    .and_then(|raw| raw.parse::<jiff::Timestamp>().ok())
+                    .map(|t| {
+                        format!(
+                            "ts {}",
+                            t.to_zoned(jiff::tz::TimeZone::system())
+                                .strftime("%m-%d %H:%M:%S")
+                        )
+                    })
+                    .unwrap_or_else(|| c.kind.clone())
+            } else {
+                c.kind.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn entry_item(
     e: &zconned_stdio_types::Entry,
     received: Option<bool>,
@@ -1048,12 +1078,7 @@ fn entry_item(
         Some(v) => format!("{} \u{2014} {}", v.kind, preview_bytes(&v.data)),
         None => "(value missing)".into(),
     });
-    let claims = e
-        .claims
-        .iter()
-        .map(|c| c.kind.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let claims = claims_label(&e.claims);
     // The delivery marker: ✓ = every stated frontier covers the row;
     // a bare dot = sent, receipt pending; nothing = an arrival or a
     // pre-session row (the interface does not know its facts).
@@ -1391,11 +1416,18 @@ fn render_keybar(
 mod tests {
     use super::*;
 
+
+
     #[test]
     fn the_default_lattice_lays_the_two_windows_at_the_column_ratio() {
         // {1,2} on a 100x30 base, column 0.30: the bottom row
         // collapses to zero (rendering only).
-        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, true, false, false]);
+        let rects = lattice_rects(
+            Rect::new(0, 0, 100, 30),
+            0.30,
+            0.5,
+            [true, true, false, false],
+        );
         let [r1, r2, r3, r4] = rects;
         let r1 = r1.expect("slot 1 renders");
         let r2 = r2.expect("slot 2 renders");
@@ -1408,7 +1440,12 @@ mod tests {
     fn a_whole_empty_column_collapses_a_whole_empty_row_collapses() {
         // {1,3}: the right column collapses; the two left slots
         // stack full-width at the row ratio.
-        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, false, true, false]);
+        let rects = lattice_rects(
+            Rect::new(0, 0, 100, 30),
+            0.30,
+            0.5,
+            [true, false, true, false],
+        );
         let [r1, _, r3, _] = rects;
         let r1 = r1.expect("slot 1 renders");
         let r3 = r3.expect("slot 3 renders");
@@ -1416,7 +1453,12 @@ mod tests {
         assert_eq!((r3.y, r3.width, r3.height), (15, 100, 15));
         // {1} alone: both the right column and the bottom row
         // collapse — one full-base window.
-        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, false, false, false]);
+        let rects = lattice_rects(
+            Rect::new(0, 0, 100, 30),
+            0.30,
+            0.5,
+            [true, false, false, false],
+        );
         let [r1, r2, r3, r4] = rects;
         let r1 = r1.expect("slot 1 renders");
         assert_eq!((r1.width, r1.height), (100, 30));
@@ -1427,7 +1469,12 @@ mod tests {
     fn empty_slots_inside_live_rows_and_columns_keep_their_quadrants() {
         // {1,4}: every row and column is live — slots 2 and 3 get
         // their quadrants back (the caller renders them dark).
-        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, false, false, true]);
+        let rects = lattice_rects(
+            Rect::new(0, 0, 100, 30),
+            0.30,
+            0.5,
+            [true, false, false, true],
+        );
         let [r1, r2, r3, r4] = rects;
         let r1 = r1.expect("slot 1 renders");
         let r2 = r2.expect("slot 2's reserved quadrant");
@@ -1440,12 +1487,68 @@ mod tests {
     }
 
     #[test]
+    fn the_timestamp_claim_renders_the_local_send_time_not_the_raw_utc() {
+        use zconned_material::Value;
+        use zconned_stdio_types::{Entry, ResolvedClaim};
+        // The core stamps the send time as an RFC3339 UTC string.
+        let raw = "2026-11-15T14:25:07.5Z";
+        let entry = Entry {
+            claims: vec![ResolvedClaim {
+                kind: CLAIM_KIND_TS.into(),
+                value: Some(Value {
+                    kind: CLAIM_KIND_TS.into(),
+                    data: raw.as_bytes().to_vec(),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let tail = claims_label(&entry.claims);
+        // The local wall time shape (ts MM-DD HH:MM:SS), never the
+        // raw UTC form (a 'T' separator or the 'Z' suffix).
+        assert!(tail.starts_with("ts "), "{tail}");
+        assert_eq!(tail.len(), "ts MM-DD HH:MM:SS".len(), "{tail}");
+        assert!(!tail.contains('T') && !tail.contains('Z'), "{tail}");
+    }
+
+    #[test]
+    fn other_claims_keep_their_kind_and_a_bad_ts_claim_falls_back() {
+        use zconned_material::Value;
+        use zconned_stdio_types::{Entry, ResolvedClaim};
+        let entry = Entry {
+            claims: vec![
+                ResolvedClaim {
+                    kind: "application/vnd.zconn.sig".into(),
+                    ..Default::default()
+                },
+                ResolvedClaim {
+                    kind: CLAIM_KIND_TS.into(),
+                    value: Some(Value {
+                        kind: CLAIM_KIND_TS.into(),
+                        data: b"not-a-timestamp".to_vec(),
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let label = claims_label(&entry.claims);
+        assert!(label.contains("application/vnd.zconn.sig"));
+        assert!(label.contains("application/vnd.zconn.ts"));
+    }
+
+    #[test]
     fn a_quadrant_below_the_floor_is_honest_dark_space_not_a_window() {
         // The floor guard lives at the render site: a narrow base
         // puts slot 1's quadrant under MIN_SLOT_W — its geometry
         // still computes (the caller turns it dark), and slot 2
         // keeps its share.
-        let rects = lattice_rects(Rect::new(0, 0, 40, 30), 0.30, 0.5, [true, true, false, false]);
+        let rects = lattice_rects(
+            Rect::new(0, 0, 40, 30),
+            0.30,
+            0.5,
+            [true, true, false, false],
+        );
         let [r1, r2, _, _] = rects;
         let r1 = r1.expect("the geometry still computes");
         let r2 = r2.expect("slot 2 renders");

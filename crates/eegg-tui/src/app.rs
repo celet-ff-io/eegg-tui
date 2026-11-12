@@ -521,6 +521,22 @@ impl App {
     fn open_fp_popup(&mut self) {
         let anchor = match self.viewport(self.focus_region()).content {
             ContentKind::Authors => self.selected_author(),
+            // The transcript's people are their messages: f = the
+            // SELECTED row's author's full fingerprint.
+            ContentKind::Transcript => {
+                let from = self
+                    .viewport(self.focus_region())
+                    .transcript_sel
+                    .selected()
+                    .and_then(|i| self.entries.get(i))
+                    .and_then(|e| e.meta.as_ref())
+                    .map(|m| m.from.clone())
+                    .unwrap_or_default();
+                if from.is_empty() {
+                    self.flash = Some("the selected row has no author".into());
+                }
+                (!from.is_empty()).then_some(from)
+            }
             ContentKind::Mailboxes => {
                 match self.viewport(self.focus_region()).mailboxes_sel.selected() {
                     Some(i) if i > 0 => self.peers.get(i - 1).map(anchor_of),
@@ -1490,12 +1506,14 @@ impl App {
         // The temp window: a modal overlay (the profile-popup
         // pattern — the popups above stack over it). No structural
         // navigation out of it: Esc pops it back to the origin
-        // region, q quits, everything else runs with full dispatch
-        // parity (ruling 10).
+        // region, q = back means closing it (a layer above the base
+        // layout; the FIRST layer's back is the quit — the regions
+        // below), everything else runs with full dispatch parity
+        // (ruling 10).
         if self.temp.is_some() && self.focus != Focus::Compose {
             match key.code {
                 KeyCode::Char('?') => self.show_help = true,
-                KeyCode::Char('q') => self.quit = true,
+                KeyCode::Char('q') => self.close_temp(),
                 KeyCode::Char('L') => {
                     self.show_log = true;
                     self.log_scroll = 0;
@@ -1619,6 +1637,8 @@ impl App {
                 // The transcript text channels: yank to the
                 // clipboard, save to a file (the path box).
                 KeyCode::Char('y') => self.transcript_yank(),
+                // The selected row's author's full fingerprint.
+                KeyCode::Char('f') => self.open_fp_popup(),
                 // The meta switches: t = the local timestamps, T =
                 // the message fingerprints.
                 KeyCode::Char('t') => {
@@ -2480,6 +2500,49 @@ mod tests {
         );
         assert_eq!(wrap_width("abcdefgh", 3), vec!["abc", "def", "gh"]);
         assert_eq!(wrap_width("", 10), vec![""]);
+    }
+
+    #[test]
+    fn f_in_the_transcript_shows_the_selected_row_author() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.set_region_content(0, ContentKind::Transcript);
+        app.focus = Focus::Region(0);
+        app.entries = vec![Entry {
+            meta: Some(zconned_stdio_types::RowMeta {
+                from: vec![7u8; zconned_crypto::DIGEST_LEN],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        app.regions[0].transcript_sel.select(Some(0));
+        app.on_key(KeyEvent::from(KeyCode::Char('f')));
+        assert!(
+            app.fp_shown
+                .as_deref()
+                .is_some_and(|s| s.starts_with("sha3-256:"))
+        );
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.fp_shown.is_none());
+        // A row without an author: the flash, no popup.
+        app.entries[0].meta = None;
+        app.on_key(KeyEvent::from(KeyCode::Char('f')));
+        assert!(app.fp_shown.is_none() && app.flash.is_some());
+    }
+
+    #[test]
+    fn q_in_the_temp_window_closes_it_not_the_app() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.on_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.temp.is_some());
+        // The picker is already the fresh temp's first face: pick
+        // the mailboxes directly (m here would BACK = close).
+        app.on_key(KeyEvent::from(KeyCode::Char('4')));
+        assert_eq!(app.temp.as_ref().unwrap().content, ContentKind::Mailboxes);
+        // q = back: the window closes, the app lives.
+        app.on_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(app.temp.is_none() && !app.quit);
     }
 
     #[test]

@@ -285,7 +285,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 58] = [
+    let rows: [(bool, &str, &str); 59] = [
         (false, "global", ""),
         (
             true,
@@ -329,6 +329,7 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
             "",
             "remark | fp seg1 = the author; * = roster-confirmed",
         ),
+        (true, "f", "the selected row's author's full fingerprint"),
         (true, "t", "toggle the local timestamps"),
         (true, "T", "toggle the message fingerprints"),
         (true, "j/k \u{2191}\u{2193}", "scroll"),
@@ -1089,7 +1090,7 @@ fn keybar_hints(app: &App) -> &'static str {
             "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter show in transcript windows · j/k move · m mode · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
-            "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · t ts · T fp · m mode · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · f author fp · t ts · T fp · m mode · L log · ? help · q quit"
         }
         ContentKind::Authors => {
             "r remark · R clear remark · f full fingerprint · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"

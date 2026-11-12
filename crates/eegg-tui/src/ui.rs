@@ -930,7 +930,14 @@ fn entry_item(
             .as_ref()
             .and_then(|m| m.ts.as_ref())
             .and_then(|ts| jiff::Timestamp::from_second(ts.seconds).ok())
-            .map(|t| t.strftime("%m-%d %H:%M:%S").to_string())
+            // strftime on the bare Timestamp renders UTC; convert to
+            // the system zone so the toggle shows the reader's local
+            // wall time (jiff caches the system zone lookup).
+            .map(|t| {
+                t.to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%m-%d %H:%M:%S")
+                    .to_string()
+            })
             .unwrap_or_else(|| "????-??".into())
     } else {
         String::new()

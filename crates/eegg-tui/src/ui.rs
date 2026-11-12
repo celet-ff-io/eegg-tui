@@ -3,6 +3,8 @@
 
 use std::io::Stdout;
 
+use unicode_width::UnicodeWidthStr;
+
 use miette::IntoDiagnostic as _;
 use ratatui::{
     Frame, Terminal,
@@ -18,7 +20,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, CardFlow, ContentKind, Focus, anchor_of, digest_preview, fp_short, preview_bytes,
+    App, CardFlow, ContentKind, Focus, anchor_of, digest_preview, fp_short, full_text,
+    preview_bytes, wrap_width,
 };
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -282,7 +285,7 @@ fn render_file_box(app: &App, f: &mut Frame) {
 /// j/k scroll it when the terminal is short.
 fn render_help_popup(app: &mut App, f: &mut Frame) {
     // (true = an operation row; false = a section header.)
-    let rows: [(bool, &str, &str); 56] = [
+    let rows: [(bool, &str, &str); 58] = [
         (false, "global", ""),
         (
             true,
@@ -312,19 +315,29 @@ fn render_help_popup(app: &mut App, f: &mut Frame) {
         (true, "Esc/m/q", "back to the pre-modes page (no change)"),
         (false, "threads", ""),
         (true, "t", "refresh the thread list"),
-        (true, "n", "new thread (fresh chain on the next send)"),
-        (true, "Enter", "open the selected thread"),
+        (true, "n", "new thread (the transcript windows track it)"),
+        (
+            true,
+            "Enter",
+            "show the selected thread in the transcript windows",
+        ),
         (true, "j/k \u{2191}\u{2193}", "move the selection"),
         (true, "g/G", "jump to the top / the bottom"),
         (false, "transcript", ""),
         (
             true,
             "",
-            "from <anchor> = the row's author; * = roster-confirmed",
+            "remark | fp seg1 = the author; * = roster-confirmed",
         ),
+        (true, "t", "toggle the local timestamps"),
+        (true, "T", "toggle the message fingerprints"),
         (true, "j/k \u{2191}\u{2193}", "scroll"),
         (true, "PgUp/PgDn", "page by a screen"),
-        (true, "n", "new thread (fresh chain on the next send)"),
+        (
+            true,
+            "n",
+            "new thread (the transcript tracks it; typing at once)",
+        ),
         (true, "r", "re-stage the draft"),
         (true, "y", "copy the selected row's text to the clipboard"),
         (true, "w", "save the selected row's text to a file"),
@@ -788,10 +801,21 @@ fn render_status(app: &App, f: &mut Frame, area: ratatui::prelude::Rect) {
 }
 
 fn render_threads(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
+    // The synthetic new-thread row (armed by n): no id yet — it
+    // reads as a pending state, styled apart (italic, cyan).
     let items: Vec<ListItem> = app
-        .threads
-        .iter()
-        .map(|t| ListItem::from(Span::from(digest_preview(&t.digest))))
+        .new_thread_row
+        .then(|| {
+            ListItem::from(
+                Span::from("new thread").style(Style::default().italic().fg(Color::Cyan)),
+            )
+        })
+        .into_iter()
+        .chain(
+            app.threads
+                .iter()
+                .map(|t| ListItem::from(Span::from(digest_preview(&t.digest)))),
+        )
         .collect();
     let list = List::new(items)
         .block(
@@ -848,15 +872,26 @@ fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prel
             let overlay = app.locals.get(&digest);
             let confirmed =
                 !from.is_empty() && overlay.is_some_and(|o| o.signers.iter().any(|a| a == &from));
-            let fallback = fp_short(&from);
+            // The author label: the remark when stated, else the
+            // FIRST segment of the short fingerprint (the meta took
+            // too much room — the principal).
+            let seg1 = fp_short(&from).split(' ').next().unwrap_or("").to_owned();
             let author = (!from.is_empty()).then(|| {
                 overlay
                     .and_then(|o| o.author_remark.as_deref())
                     .filter(|r| !r.is_empty())
-                    .unwrap_or(fallback.as_str())
+                    .unwrap_or(seg1.as_str())
                     .to_owned()
             });
-            entry_item(e, app.row_received(&digest), author.as_deref(), confirmed)
+            entry_item(
+                e,
+                app.row_received(&digest),
+                author.as_deref(),
+                confirmed,
+                log_a.width as usize,
+                app.show_ts,
+                app.show_fp,
+            )
         })
         .collect();
     let list =
@@ -881,20 +916,34 @@ fn entry_item(
     received: Option<bool>,
     author: Option<&str>,
     confirmed: bool,
+    width: usize,
+    show_ts: bool,
+    show_fp: bool,
 ) -> ListItem<'static> {
-    let ts = e
-        .meta
-        .as_ref()
-        .and_then(|m| m.ts.as_ref())
-        .and_then(|ts| jiff::Timestamp::from_second(ts.seconds).ok())
-        .map(|t| t.strftime("%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| "????-??".into());
-    let digest = e
-        .meta
-        .as_ref()
-        .map(|m| digest_preview(&m.digest))
-        .unwrap_or_default();
+    let ts = if show_ts {
+        e.meta
+            .as_ref()
+            .and_then(|m| m.ts.as_ref())
+            .and_then(|ts| jiff::Timestamp::from_second(ts.seconds).ok())
+            .map(|t| t.strftime("%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "????-??".into())
+    } else {
+        String::new()
+    };
+    let digest = if show_fp {
+        e.meta
+            .as_ref()
+            .map(|m| digest_preview(&m.digest))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // text/plain hides its kind label (every row was one) and shows
+    // the FULL text — the body wraps at the window width now, so
+    // nothing is truncated; the other kinds keep the bounded
+    // preview (a wall of bytes would flood the window).
     let content = e.content.as_ref().map(|slot| match &slot.value {
+        Some(v) if v.kind == "text/plain" => full_text(&v.data),
         Some(v) => format!("{} \u{2014} {}", v.kind, preview_bytes(&v.data)),
         None => "(value missing)".into(),
     });
@@ -914,34 +963,45 @@ fn entry_item(
             Span::from(" \u{00b7}").dark_gray()
         }
     });
-    let mut line = vec![
-        Span::from(ts).dark_gray(),
-        Span::from(" "),
-        Span::from(digest).cyan(),
-    ];
-    if let Some(m) = marker {
-        line.push(m);
-    }
-    // The author's anchor as the core observed it (or the author's
-    // local remark in its place); ✍ = confirmed from the author
-    // (their signature is in the row's roster).
+    // The meta head: author (remark | fp seg1) + the confirmed star,
+    // the marker, then the switches' fields.
+    let mut meta: Vec<Span> = Vec::new();
     if let Some(a) = author {
-        line.push(Span::from(format!(" from {a}")).dark_gray());
+        meta.push(Span::from(a.to_owned()).dark_gray());
         if confirmed {
-            line.push(Span::from(" *").magenta());
+            meta.push(Span::from("*").magenta());
         }
     }
-    line.push(Span::from("  "));
-    line.push(Span::from(content.unwrap_or_else(|| "(no content)".into())));
-    line.push(
-        Span::from(if claims.is_empty() {
-            String::new()
-        } else {
-            format!("   [{claims}]")
-        })
-        .dark_gray(),
-    );
-    ListItem::from(Line::from(line))
+    if let Some(m) = marker {
+        meta.push(m);
+    }
+    if !ts.is_empty() {
+        meta.push(Span::from(format!(" {ts}")).dark_gray());
+    }
+    if !digest.is_empty() {
+        meta.push(Span::from(format!(" {digest}")).cyan());
+    }
+    meta.push(Span::from("  "));
+    let meta_w: usize = meta
+        .iter()
+        .map(|sp| UnicodeWidthStr::width(sp.content.as_ref()))
+        .sum();
+    // The body: line 1 shares the row with the meta, the rest wrap
+    // under it (indented two). The claims follow on the last line.
+    let first_w = width.saturating_sub(meta_w).max(1);
+    let chunks = wrap_width(&content.unwrap_or_else(|| "(no content)".into()), first_w);
+    let mut lines: Vec<Line> = Vec::with_capacity(chunks.len());
+    let mut first: Vec<Span> = meta;
+    first.push(Span::from(chunks[0].clone()));
+    lines.push(Line::from(first));
+    for c in chunks.iter().skip(1) {
+        lines.push(Line::from(vec![Span::from("  "), Span::from(c.clone())]));
+    }
+    if let Some(last) = lines.last_mut().filter(|_| !claims.is_empty()) {
+        last.spans
+            .push(Span::from(format!("   [{claims}]")).dark_gray());
+    }
+    ListItem::new(lines)
 }
 
 /// The composer's body INSIDE its transcript's frame: the draft
@@ -1029,7 +1089,7 @@ fn keybar_hints(app: &App) -> &'static str {
             "<Ctrl+h/j/k/l> navigate · t refresh · n new thread · Enter show in transcript windows · j/k move · m mode · L log · ? help · q quit"
         }
         ContentKind::Transcript => {
-            "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · m mode · L log · ? help · q quit"
+            "<Ctrl+h/j/k/l> navigate · j/k scroll · PgUp/PgDn page · n new thread · i compose · r staged · y copy · w save row · t ts · T fp · m mode · L log · ? help · q quit"
         }
         ContentKind::Authors => {
             "r remark · R clear remark · f full fingerprint · c copy card · s save card · j/k move · m mode · L log · ? help · q quit"

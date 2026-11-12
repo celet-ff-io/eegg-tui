@@ -198,6 +198,11 @@ pub struct App {
     /// The thread the transcript had open when the new-thread state
     /// armed (the teardown restores it — a fresh log fetch).
     pub pre_new_thread: Option<MsgRef>,
+    /// The transcript's meta switches (the principal: the meta took
+    /// too much room): t toggles the local timestamps, T the
+    /// message fingerprints. Global (every transcript window).
+    pub show_ts: bool,
+    pub show_fp: bool,
     /// The working draft (from msg_draft_push).
     pub staged: Option<(Option<Value>, Vec<Value>)>,
     /// The send-target set (the whole resting set, replaced on every
@@ -370,6 +375,8 @@ impl App {
             new_thread_intent: false,
             new_thread_row: false,
             pre_new_thread: None,
+            show_ts: true,
+            show_fp: false,
             staged: None,
             peers: Vec::new(),
             self_card: None,
@@ -1612,6 +1619,24 @@ impl App {
                 // The transcript text channels: yank to the
                 // clipboard, save to a file (the path box).
                 KeyCode::Char('y') => self.transcript_yank(),
+                // The meta switches: t = the local timestamps, T =
+                // the message fingerprints.
+                KeyCode::Char('t') => {
+                    self.show_ts = !self.show_ts;
+                    self.flash = Some(if self.show_ts {
+                        "timestamps on".into()
+                    } else {
+                        "timestamps off".into()
+                    });
+                }
+                KeyCode::Char('T') => {
+                    self.show_fp = !self.show_fp;
+                    self.flash = Some(if self.show_fp {
+                        "fingerprints on".into()
+                    } else {
+                        "fingerprints off".into()
+                    });
+                }
                 KeyCode::Char('w') => {
                     self.file_input.reset();
                     self.file_box = FileBox::SaveTranscript;
@@ -2075,6 +2100,49 @@ pub fn fp_short(digest: &[u8]) -> String {
         .join(" ")
 }
 
+/// The FULL printable text of a text/plain row (no preview
+/// truncation — the renderer wraps it at the window width). The
+/// same visible marks as the preview: newlines render as an
+/// arrow, tabs as an open box, \r is dropped; non-printable
+/// bytes fall back to the bounded hex preview.
+pub fn full_text(data: &[u8]) -> String {
+    let lossy = String::from_utf8_lossy(data).into_owned();
+    let printable = lossy
+        .chars()
+        .filter(|c| !matches!(c, '\n' | '\r' | '\t'))
+        .all(|c| !c.is_control());
+    if printable {
+        lossy
+            .replace('\r', "")
+            .replace('\n', " \u{23ce} ")
+            .replace('\t', " \u{2423} ")
+    } else {
+        let n = data.len().min(8);
+        format!("{:02x?}", &data[..n])
+    }
+}
+
+/// Character-level hard wrap by DISPLAY width (CJK chars count
+/// double — the terminal does; unicode-width decides). One chunk
+/// per line, each at most `max` columns wide. An empty text
+/// yields one empty line (the row still renders).
+pub fn wrap_width(text: &str, max: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let max = max.max(1);
+    let mut lines: Vec<String> = vec![String::new()];
+    let mut w = 0usize;
+    for c in text.chars() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw > max {
+            lines.push(String::new());
+            w = 0;
+        }
+        lines.last_mut().expect("seeded").push(c);
+        w += cw;
+    }
+    lines
+}
+
 pub fn preview_bytes(data: &[u8]) -> String {
     let lossy = String::from_utf8_lossy(data).into_owned();
     // Newlines/tabs are PRINTABLE here (the drafts are multi-line);
@@ -2384,6 +2452,34 @@ mod tests {
         assert!(matches!(app.focus, Focus::Compose));
         // The transcript tracks the fresh thread, not the old one.
         assert!(app.open_thread.is_none() && app.entries.is_empty());
+    }
+
+    #[test]
+    fn t_toggles_the_timestamps_and_capital_t_the_fingerprints() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.set_region_content(0, ContentKind::Transcript);
+        app.focus = Focus::Region(0);
+        assert!(app.show_ts && !app.show_fp);
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(!app.show_ts);
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        assert!(app.show_fp);
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        assert!(app.show_ts && !app.show_fp);
+    }
+
+    #[test]
+    fn wrap_width_counts_display_width_not_chars() {
+        // CJK chars are double width: 星团 fills 4 columns, so "ab"
+        // must wrap even though the char count would fit.
+        assert_eq!(
+            wrap_width("\u{661f}\u{56e2}ab", 4),
+            vec!["\u{661f}\u{56e2}", "ab"]
+        );
+        assert_eq!(wrap_width("abcdefgh", 3), vec!["abc", "def", "gh"]);
+        assert_eq!(wrap_width("", 10), vec![""]);
     }
 
     #[test]

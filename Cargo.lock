@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "eegg-tui"
-version = "0.1.0-alpha.23"
+version = "0.1.0-alpha.24"
 dependencies = [
  "arboard",
  "base64",
@@ -727,6 +727,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tui-input",
  "typed-builder",
+ "unicode-width 0.2.3",
  "zconned-crypto",
  "zconned-material",
  "zconned-stdio-types",

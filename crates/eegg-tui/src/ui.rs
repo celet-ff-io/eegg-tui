@@ -13,6 +13,7 @@ use ratatui::{
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
+    buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style, Stylize as _},
     text::{Line, Span},
@@ -39,6 +40,64 @@ pub fn restore_terminal() {
     let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
 }
 
+/// The render guard: a slot whose quadrant falls below these
+/// floors is NOT rendered (dark) — never closed; it returns when
+/// the terminal grows. The terminal is the ultimate clamp.
+const MIN_SLOT_W: u16 = 20;
+const MIN_SLOT_H: u16 = 4;
+
+/// The lattice slot areas over `base`. A whole-empty ROW or COLUMN
+/// collapses to zero (rendering only — the stored ratios survive);
+/// every slot whose row and column are both live gets its quadrant
+/// area, active or not (an empty one renders dark — the reserved
+/// position stays visible for the window keys). The caller applies
+/// the floor guard to the ACTIVE slots only.
+pub(crate) fn lattice_rects(
+    base: Rect,
+    column: f64,
+    row: f64,
+    active: [bool; 4],
+) -> [Option<Rect>; 4] {
+    let (w, h) = (base.width, base.height);
+    let top_live = active[0] || active[1];
+    let bottom_live = active[2] || active[3];
+    let left_live = active[0] || active[2];
+    let right_live = active[1] || active[3];
+    let top_h = match (top_live, bottom_live) {
+        (true, true) => (row * f64::from(h)).round() as u16,
+        (true, false) => h,
+        _ => 0,
+    };
+    let left_w = match (left_live, right_live) {
+        (true, true) => (column * f64::from(w)).round() as u16,
+        (true, false) => w,
+        _ => 0,
+    };
+    let (top, bottom) = (top_h, h.saturating_sub(top_h));
+    let (left, right) = (left_w, w.saturating_sub(left_w));
+    let quadrant = |y: u16, hh: u16, x: u16, ww: u16| Rect {
+        x: base.x + x,
+        y: base.y + y,
+        width: ww,
+        height: hh,
+    };
+    [
+        (top_live && left_live).then(|| quadrant(0, top, 0, left)),
+        (top_live && right_live).then(|| quadrant(0, top, left, right)),
+        (bottom_live && left_live).then(|| quadrant(top, bottom, 0, left)),
+        (bottom_live && right_live).then(|| quadrant(top, bottom, left, right)),
+    ]
+}
+
+/// The dark placeholder: a reserved empty position, or an active
+/// window whose quadrant cannot meet the floor. Honest dark space —
+/// the position stays visible; the window returns when it fits.
+fn render_dark(area: Rect, buf: &mut Buffer) {
+    Block::new()
+        .style(Style::new().bg(Color::DarkGray))
+        .render(area, buf);
+}
+
 pub fn render(app: &mut App, f: &mut Frame) {
     // The keybar's height follows its hint lines (1 normally, 2 when
     // the hints wrapped) — the wrap decision needs the width and the
@@ -55,14 +114,36 @@ pub fn render(app: &mut App, f: &mut Frame) {
         Constraint::Length(hint_lines.len() as u16),
     ])
     .areas(f.area());
-    // The two regions: region 1 is the narrow side, region 2 the
-    // wide main (the later layout engine makes the split movable).
-    let [r0, r1] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).areas(main);
-
+    // The window lattice: the regions render THROUGH it. The
+    // active windows are the regions vector in reading order; an
+    // empty reserved position (or a window below the floor) renders
+    // dark — the position stays visible.
+    let mut next = 0usize;
+    for (p, q) in lattice_rects(
+        main,
+        app.lattice.column,
+        app.lattice.row,
+        app.lattice.active,
+    )
+    .into_iter()
+    .enumerate()
+    {
+        let is_active = app.lattice.active[p];
+        let i = next;
+        if is_active {
+            next += 1;
+        }
+        match q {
+            Some(area) if is_active && area.width >= MIN_SLOT_W && area.height >= MIN_SLOT_H => {
+                render_region(app, f, i, area);
+            }
+            // A reserved position, or an active window whose
+            // quadrant cannot meet the floor: honest dark space.
+            Some(area) => render_dark(area, f.buffer_mut()),
+            None => {}
+        }
+    }
     render_status(app, f, status);
-    render_region(app, f, 0, r0);
-    render_region(app, f, 1, r1);
     render_keybar(f, keybar, &hint_lines, &version);
     if app.temp.is_some() {
         render_temp(app, f);
@@ -233,7 +314,7 @@ fn render_modes(app: &App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect
                 .title(if i == crate::app::TEMP_VIEW {
                     " modes ".to_owned()
                 } else {
-                    format!(" {} modes ", i + 1)
+                    format!(" {} modes ", app.slot_number(i))
                 })
                 .border_style(region_border(app, i)),
         )
@@ -534,7 +615,7 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
         CardFlow::InputCard | CardFlow::ReadCard | CardFlow::SaveCard
     );
     let block = Block::bordered()
-        .title(format!(" {} mailboxes ", i + 1))
+        .title(format!(" {} mailboxes ", app.slot_number(i)))
         .border_style(region_border(app, i));
     let inner = block.inner(area);
     block.render(area, f.buffer_mut());
@@ -669,7 +750,7 @@ fn render_mailboxes(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelu
 /// only as the fallback), cross-referenced with the book.
 fn render_authors(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude::Rect) {
     let block = Block::bordered()
-        .title(format!(" {} authors ", i + 1))
+        .title(format!(" {} authors ", app.slot_number(i)))
         .border_style(region_border(app, i));
     let inner = block.inner(area);
     block.render(area, f.buffer_mut());
@@ -825,7 +906,11 @@ fn render_threads(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prelude
     let list = List::new(items)
         .block(
             Block::bordered()
-                .title(format!(" {} {} ", i + 1, ContentKind::Threads.title()))
+                .title(format!(
+                    " {} {} ",
+                    app.slot_number(i),
+                    ContentKind::Threads.title()
+                ))
                 .border_style(region_border(app, i)),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
@@ -845,7 +930,11 @@ fn render_transcript(app: &mut App, f: &mut Frame, i: usize, area: ratatui::prel
         0
     };
     let block = Block::bordered()
-        .title(format!(" {} {} ", i + 1, ContentKind::Transcript.title()))
+        .title(format!(
+            " {} {} ",
+            app.slot_number(i),
+            ContentKind::Transcript.title()
+        ))
         .border_style(region_border(app, i));
     let inner = block.inner(area);
     block.render(area, f.buffer_mut());
@@ -1301,6 +1390,69 @@ fn render_keybar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_lattice_lays_the_two_windows_at_the_column_ratio() {
+        // {1,2} on a 100x30 base, column 0.30: the bottom row
+        // collapses to zero (rendering only).
+        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, true, false, false]);
+        let [r1, r2, r3, r4] = rects;
+        let r1 = r1.expect("slot 1 renders");
+        let r2 = r2.expect("slot 2 renders");
+        assert_eq!((r1.width, r1.height), (30, 30));
+        assert_eq!((r2.x, r2.width, r2.height), (30, 70, 30));
+        assert!(r3.is_none() && r4.is_none());
+    }
+
+    #[test]
+    fn a_whole_empty_column_collapses_a_whole_empty_row_collapses() {
+        // {1,3}: the right column collapses; the two left slots
+        // stack full-width at the row ratio.
+        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, false, true, false]);
+        let [r1, _, r3, _] = rects;
+        let r1 = r1.expect("slot 1 renders");
+        let r3 = r3.expect("slot 3 renders");
+        assert_eq!((r1.width, r1.height), (100, 15));
+        assert_eq!((r3.y, r3.width, r3.height), (15, 100, 15));
+        // {1} alone: both the right column and the bottom row
+        // collapse — one full-base window.
+        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, false, false, false]);
+        let [r1, r2, r3, r4] = rects;
+        let r1 = r1.expect("slot 1 renders");
+        assert_eq!((r1.width, r1.height), (100, 30));
+        assert!(r2.is_none() && r3.is_none() && r4.is_none());
+    }
+
+    #[test]
+    fn empty_slots_inside_live_rows_and_columns_keep_their_quadrants() {
+        // {1,4}: every row and column is live — slots 2 and 3 get
+        // their quadrants back (the caller renders them dark).
+        let rects = lattice_rects(Rect::new(0, 0, 100, 30), 0.30, 0.5, [true, false, false, true]);
+        let [r1, r2, r3, r4] = rects;
+        let r1 = r1.expect("slot 1 renders");
+        let r2 = r2.expect("slot 2's reserved quadrant");
+        let r3 = r3.expect("slot 3's reserved quadrant");
+        let r4 = r4.expect("slot 4 renders");
+        assert_eq!((r1.x, r1.y, r1.width, r1.height), (0, 0, 30, 15));
+        assert_eq!((r2.x, r2.y, r2.width, r2.height), (30, 0, 70, 15));
+        assert_eq!((r3.x, r3.y, r3.width, r3.height), (0, 15, 30, 15));
+        assert_eq!((r4.x, r4.y, r4.width, r4.height), (30, 15, 70, 15));
+    }
+
+    #[test]
+    fn a_quadrant_below_the_floor_is_honest_dark_space_not_a_window() {
+        // The floor guard lives at the render site: a narrow base
+        // puts slot 1's quadrant under MIN_SLOT_W — its geometry
+        // still computes (the caller turns it dark), and slot 2
+        // keeps its share.
+        let rects = lattice_rects(Rect::new(0, 0, 40, 30), 0.30, 0.5, [true, true, false, false]);
+        let [r1, r2, _, _] = rects;
+        let r1 = r1.expect("the geometry still computes");
+        let r2 = r2.expect("slot 2 renders");
+        assert_eq!(r1.width, 12);
+        assert!(r1.width < MIN_SLOT_W);
+        assert_eq!(r2.width, 28);
+    }
 
     fn line_width(line: &[Span]) -> u16 {
         line.iter().map(|s| s.width() as u16).sum()

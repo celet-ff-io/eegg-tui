@@ -94,6 +94,36 @@ impl ContentKind {
 /// parity with a region (ruling 10) without being a region.
 pub(crate) const TEMP_VIEW: usize = 2;
 
+/// The window lattice: WHICH of the four lattice slots hold a
+/// window, and the two split ratios. The slots are POSITIONS —
+/// 1 top-left, 2 top-right, 3 bottom-left, 4 bottom-right — and
+/// they never renumber: closing a window leaves a hole (rendered
+/// dark), opening one fills the position back. The regions vector
+/// holds the ACTIVE windows in reading order (slot 1, 2, 3, 4);
+/// its length always equals the active count.
+#[derive(Debug)]
+pub struct Lattice {
+    /// The left column's share of the base width (0.0..1.0).
+    pub column: f64,
+    /// The top row's share of the base height (0.0..1.0).
+    pub row: f64,
+    /// Slots 1..4 hold a window.
+    pub active: [bool; 4],
+}
+
+impl Default for Lattice {
+    fn default() -> Self {
+        // The first screen: the threads list on the narrow left,
+        // the transcript on the wide right, the bottom row empty
+        // (it collapses to zero until a window fills it).
+        Self {
+            column: 0.30,
+            row: 0.5,
+            active: [true, true, false, false],
+        }
+    }
+}
+
 /// One region: which content it shows, plus that content's VIEW
 /// state. The view state is per-region on purpose — the same content
 /// open in both regions keeps independent cursors; the DATA it
@@ -148,9 +178,14 @@ pub enum Focus {
 #[derive(Debug)]
 pub struct App {
     pub focus: Focus,
-    /// The regions (two now; the later layout engine grows the
-    /// vector without a rewrite).
+    /// The regions (the ACTIVE lattice windows in reading order;
+    /// the layout engine grows the vector without a rewrite).
     pub regions: Vec<Viewport>,
+    /// The window lattice: which slots hold a window + the split
+    /// ratios. The slots are positions (never renumbered) — this
+    /// is layout METADATA, the regions vector is its reading-order
+    /// projection.
+    pub lattice: Lattice,
     /// The composer renders inside its HOST region's transcript —
     /// fixed at summon time.
     pub compose_host: usize,
@@ -359,6 +394,7 @@ impl App {
                 Viewport::new(ContentKind::Threads),
                 Viewport::new(ContentKind::Transcript),
             ],
+            lattice: Lattice::default(),
             compose_host: 1,
             mode_menu: false,
             mode_sel: 0,
@@ -472,9 +508,44 @@ impl App {
     }
 
     /// Direct structural jumps: to a numbered region (Ctrl+h/l, the
-    /// arrows, 1/2; the composer's moving mode rides the same layer).
+    /// arrows; the composer's moving mode rides the same layer).
     fn nav_to_region(&mut self, region: usize) {
         self.focus = Focus::Region(region.min(self.regions.len().saturating_sub(1)));
+    }
+
+    /// The slot number (1..4) of the window at region index `i` —
+    /// the NUMBER the titles and the jumps speak. The temp window
+    /// is unnumbered (it has no slot).
+    pub(crate) fn slot_number(&self, i: usize) -> usize {
+        let mut seen = 0;
+        for (p, active) in self.lattice.active.iter().enumerate() {
+            if *active {
+                seen += 1;
+                if seen == i + 1 {
+                    return p + 1;
+                }
+            }
+        }
+        unreachable!("the regions vector and the lattice disagree")
+    }
+
+    /// The region index of the window numbered `n` (1..4), if that
+    /// lattice slot holds one.
+    pub(crate) fn slot_index(&self, n: usize) -> Option<usize> {
+        if !(1..=4).contains(&n) || !self.lattice.active[n - 1] {
+            return None;
+        }
+        Some(self.lattice.active[..n - 1].iter().filter(|a| **a).count())
+    }
+
+    /// The numbers address LATTICE POSITIONS: jumping to a number
+    /// focuses the window at that slot; an empty slot refuses (a
+    /// number never creates or destroys a window).
+    fn nav_to_number(&mut self, n: usize) {
+        match self.slot_index(n) {
+            Some(i) => self.nav_to_region(i),
+            None => self.flash = Some(format!("window {n} is empty")),
+        }
     }
 
     /// The focused region's index (the composer has none — its host
@@ -1586,9 +1657,12 @@ impl App {
             KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => self.nav_to_region(1),
             KeyCode::Up if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus_back(),
             KeyCode::Down if key.modifiers == KeyModifiers::CONTROL => self.cycle_focus(),
-            // The numbered regions: the direct jump (no cycling).
-            KeyCode::Char('1') => self.nav_to_region(0),
-            KeyCode::Char('2') => self.nav_to_region(1),
+            // The numbered windows: the direct jump by LATTICE SLOT
+            // (an empty slot refuses with a flash; a number never
+            // creates or destroys a window).
+            KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
+                self.nav_to_number(c.to_digit(10).expect("checked") as usize);
+            }
             // The mode: the whole-window content picker over
             // this region, the cursor starting on the current
             // content. `o` stays free for the transcript's future
@@ -2648,6 +2722,49 @@ mod tests {
         // q = back: the window closes, the app lives.
         app.on_key(KeyEvent::from(KeyCode::Char('q')));
         assert!(app.temp.is_none() && !app.quit);
+    }
+
+    #[test]
+    fn the_numbers_address_lattice_slots_and_empty_slots_refuse() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        // The default lattice {1,2}: the numbers map to the
+        // reading-order regions, and the titles speak the slot
+        // number.
+        assert_eq!(app.slot_number(0), 1);
+        assert_eq!(app.slot_number(1), 2);
+        assert_eq!(app.slot_index(1), Some(0));
+        assert_eq!(app.slot_index(2), Some(1));
+        // 1/2 jump to the windows; 3/4 hit EMPTY slots — they
+        // refuse with a flash and never move the focus.
+        app.on_key(KeyEvent::from(KeyCode::Char('2')));
+        assert_eq!(app.focus, Focus::Region(1));
+        app.on_key(KeyEvent::from(KeyCode::Char('3')));
+        assert_eq!(app.focus, Focus::Region(1));
+        assert_eq!(app.flash.as_deref(), Some("window 3 is empty"));
+        app.on_key(KeyEvent::from(KeyCode::Char('4')));
+        assert_eq!(app.focus, Focus::Region(1));
+        assert_eq!(app.flash.as_deref(), Some("window 4 is empty"));
+        app.on_key(KeyEvent::from(KeyCode::Char('1')));
+        assert_eq!(app.focus, Focus::Region(0));
+    }
+
+    #[test]
+    fn the_slot_mapping_survives_a_hole_between_live_slots() {
+        let mut app = App::new();
+        // {1,4}: the regions vector holds the ACTIVE windows in
+        // reading order — region index 1 is WINDOW 4, not 2.
+        app.lattice.active = [true, false, false, true];
+        app.regions = vec![
+            Viewport::new(ContentKind::Threads),
+            Viewport::new(ContentKind::Mailboxes),
+        ];
+        assert_eq!(app.slot_number(0), 1);
+        assert_eq!(app.slot_number(1), 4);
+        assert_eq!(app.slot_index(1), Some(0));
+        assert_eq!(app.slot_index(4), Some(1));
+        assert_eq!(app.slot_index(2), None);
+        assert_eq!(app.slot_index(3), None);
     }
 
     #[test]
